@@ -1,0 +1,61 @@
+# ==============================================================================
+# 1. Environment Variables & Credentials (CRITICAL SECURITY)
+# ==============================================================================
+.env
+secrets.json
+*.pem
+*.key
+
+# ==============================================================================
+# 2. Modern Python Package Management (uv & venv)
+# ==============================================================================
+.venv/
+venv/
+ENV/
+env/
+.uv/
+
+# ==============================================================================
+# 3. Python Caches and Build Artifacts
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+build/
+dist/
+*.egg-info/
+
+# ==============================================================================
+# 4. Embedded Vector Databases & Local User Storage (PROJECT-SPECIFIC)
+# ==============================================================================
+# Exclude the physical databases and local folders where 100GB of user files live
+local_user_vault/
+local_user_data_store/
+cv_project_pgdata/
+*.db
+*.sqlite
+
+# ==============================================================================
+# 5. Local Machine Learning Model Weights
+# ==============================================================================
+# Prevent accidental multi-gigabyte uploads of Whisper/Jina weights downloaded locally
+.cache/huggingface/
+.cache/ollama/
+models/
+weights/
+*.bin
+*.onnx
+
+# ==============================================================================
+# 6. Operating System & IDE Specific Files
+# ==============================================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*

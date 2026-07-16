@@ -1,0 +1,97 @@
+[project]
+name = "deeplens"
+version = "0.1.0"
+description = "Privacy-First Semantic File Explorer — multi-modal RAG with swappable backends"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "DeepLens Team" }]
+
+dependencies = [
+    # Core
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "structlog>=24.0",
+    "keyring>=25.0",
+
+    # Vector Databases
+    "lancedb>=0.15",
+    "pyarrow>=17.0",
+
+    # Embeddings & LLM (Local)
+    "transformers>=4.45",
+    "torch>=2.0",
+    "pillow>=10.0",
+    "ollama>=0.4",
+
+    # Embeddings & LLM (Cloud)
+    "google-genai>=1.0",
+    "asyncpg>=0.30",
+    "pgvector>=0.3",
+    "psycopg[binary]>=3.2",
+
+    # Orchestration
+    "langgraph>=0.4",
+    "langchain-core>=0.3",
+
+    # MCP
+    "mcp>=1.0",
+
+    # Document Processing
+    "docling>=2.0",
+
+    # Audio / Video
+    "faster-whisper>=1.0",
+    "opencv-python-headless>=4.10",
+    "ffmpeg-python>=0.2",
+
+    # File Handling
+    "watchdog>=4.0",
+    "py7zr>=0.22",
+    "rarfile>=4.2",
+
+    # GUI
+    "PySide6>=6.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.14",
+    "pytest-qt>=4.4",
+    "pytest-cov>=5.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pip-audit>=2.7",
+]
+
+[project.scripts]
+deeplens = "deeplens.main:main"
+deeplens-mcp = "deeplens.mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deeplens"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
