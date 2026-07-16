@@ -23,7 +23,7 @@ class JinaClipEngine(EmbeddingEngine):
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.model_name = settings.jina_clip_model
+        self.model_name = settings.local_embedding_model
         self._model: Any = None
         self._processor: Any = None
         self._device = "cpu"

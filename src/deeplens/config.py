@@ -63,11 +63,20 @@ class Settings(BaseSettings):
     ollama_rewriter_model: str = Field(
         default="llama3.2:3b", description="Ollama rewriter model name"
     )
-    jina_clip_model: str = Field(
-        default="jinaai/jina-clip-v2", description="Jina CLIP model identifier"
+    local_embedding_model: str = Field(
+        default="jinaai/jina-clip-v2", description="Local multi-modal embedding model identifier"
     )
     whisper_model_size: str = Field(
         default="base", description="faster-whisper model size (tiny/base/small/medium/large)"
+    )
+
+    # ── OCR (Optical Character Recognition) Settings ─────────────────────
+    enable_ocr: bool = Field(default=False, description="Enable OCR for images and scanned PDFs")
+    ocr_engine: str = Field(
+        default="tesseract", description="OCR Engine to use: 'tesseract' or 'easyocr'"
+    )
+    ocr_language: str = Field(
+        default="eng", description="Language code for OCR (e.g. 'eng', 'fra', 'deu')"
     )
 
     # ── Cloud Mode ────────────────────────────────────────────────────────

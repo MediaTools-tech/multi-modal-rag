@@ -7,6 +7,7 @@ with structure boundaries intact. Falls back to plaintext for standard text/mark
 from __future__ import annotations
 
 from pathlib import Path
+from PIL import Image
 import structlog
 
 from deeplens.config import Settings
@@ -47,7 +48,18 @@ class DocumentChunker:
 
             # Perform structure-aware chunking on content_md
             chunks = DocumentChunker._split_markdown(content_md, settings.chunk_size, settings.chunk_overlap)
-            
+
+            # For PDFs that yielded little/no text (e.g. scanned documents whose
+            # content is images), fall back to OCR on rendered pages so the
+            # embedded text still becomes searchable.
+            if suffix == ".pdf" and settings.enable_ocr and not content_md.strip():
+                ocr_md = DocumentChunker._ocr_pdf(file_path, settings)
+                if ocr_md.strip():
+                    content_md = ocr_md
+                    chunks = DocumentChunker._split_markdown(
+                        content_md, settings.chunk_size, settings.chunk_overlap
+                    )
+
             for i, chunk_text in enumerate(chunks):
                 rec = VectorRecord(
                     content=chunk_text,
@@ -156,8 +168,50 @@ class DocumentChunker:
         return [c.strip() for c in chunks if c.strip()]
 
     @staticmethod
+    def _ocr_pdf(file_path: Path, settings: Settings) -> str:
+        """Render a PDF to images and run OCR on each page.
+
+        Uses PyMuPDF (fitz) to rasterize pages when available. OCR text is
+        produced via the same tesseract/easyocr engines used for images.
+        Degrades gracefully: returns an empty string if dependencies are
+        missing or OCR fails.
+        """
+        try:
+            import fitz  # PyMuPDF  # type: ignore
+        except Exception as e:
+            logger.warn("document_chunker.ocr_pdf_no_fitz", error=str(e))
+            return ""
+
+        from deeplens.ingestion.chunkers.image import _run_ocr, _should_run_ocr
+
+        try:
+            doc = fitz.open(str(file_path))
+        except Exception as e:
+            logger.warn("document_chunker.ocr_pdf_open_failed", error=str(e))
+            return ""
+
+        pages_text: list[str] = []
+        try:
+            for page_index in range(doc.page_count):
+                page = doc.load_page(page_index)
+                pix = page.get_pixmap(dpi=300)
+                import io
+
+                buf = io.BytesIO(pix.tobytes("png"))
+                with Image.open(buf) as img:
+                    # Skip recognition on text-free pages (detection gate).
+                    text = _run_ocr(img, settings) if _should_run_ocr(img, settings) else ""
+                if text:
+                    pages_text.append(f"## Page {page_index + 1}\n\n{text}")
+        except Exception as e:
+            logger.warn("document_chunker.ocr_pdf_failed", error=str(e))
+        finally:
+            doc.close()
+
+        return "\n\n".join(pages_text)
+
+    @staticmethod
     def _split_plaintext(text: str, chunk_size: int, overlap: float) -> list[str]:
-        """Split plain text by word counts."""
         words = text.split()
         chunks = []
         step = int(chunk_size * (1 - overlap))

@@ -72,8 +72,8 @@ class SettingsDialog(QDialog):
         self.line_ollama_chat = QLineEdit(self.settings.ollama_chat_model, self)
         layout_loc.addRow("Chat Model:", self.line_ollama_chat)
 
-        self.line_jina_clip = QLineEdit(self.settings.jina_clip_model, self)
-        layout_loc.addRow("Jina CLIP model:", self.line_jina_clip)
+        self.line_local_embed = QLineEdit(self.settings.local_embedding_model, self)
+        layout_loc.addRow("Local Embedding Model:", self.line_local_embed)
 
         self.combo_whisper = QComboBox(self)
         self.combo_whisper.addItems(["tiny", "base", "small", "medium", "large"])
@@ -153,6 +153,20 @@ class SettingsDialog(QDialog):
         self.spin_top_k.setValue(self.settings.search_top_k)
         layout_adv.addRow("Search Top K:", self.spin_top_k)
 
+        # OCR Controls
+        from PySide6.QtWidgets import QCheckBox
+        self.check_ocr = QCheckBox(self)
+        self.check_ocr.setChecked(self.settings.enable_ocr)
+        layout_adv.addRow("Enable OCR:", self.check_ocr)
+
+        self.combo_ocr_engine = QComboBox(self)
+        self.combo_ocr_engine.addItems(["tesseract", "easyocr"])
+        self.combo_ocr_engine.setCurrentText(self.settings.ocr_engine)
+        layout_adv.addRow("OCR Engine:", self.combo_ocr_engine)
+
+        self.line_ocr_lang = QLineEdit(self.settings.ocr_language, self)
+        layout_adv.addRow("OCR Language:", self.line_ocr_lang)
+
         # ──── Bottom Save/Cancel Row ────
         buttons_layout = QHBoxLayout()
         buttons_layout.addStretch()
@@ -182,7 +196,7 @@ class SettingsDialog(QDialog):
         data_dir = self.line_data_dir.text()
         ollama_host = self.line_ollama_host.text()
         ollama_chat = self.line_ollama_chat.text()
-        jina_clip = self.line_jina_clip.text()
+        local_embed = self.line_local_embed.text()
         whisper_size = self.combo_whisper.currentText()
         
         api_key = self.line_api_key.text().strip()
@@ -197,6 +211,10 @@ class SettingsDialog(QDialog):
         chunk_overlap = self.slide_overlap.value() / 100.0
         workers = self.spin_workers.value()
         top_k = self.spin_top_k.value()
+
+        enable_ocr = self.check_ocr.isChecked()
+        ocr_engine = self.combo_ocr_engine.currentText()
+        ocr_lang = self.line_ocr_lang.text()
 
         # Update secure Keyring for Gemini Key
         if api_key:
@@ -217,11 +235,16 @@ DEEPLENS_CHUNK_SIZE={chunk_size}
 DEEPLENS_CHUNK_OVERLAP={chunk_overlap}
 DEEPLENS_SEARCH_TOP_K={top_k}
 
+# OCR Settings
+DEEPLENS_ENABLE_OCR={enable_ocr}
+DEEPLENS_OCR_ENGINE={ocr_engine}
+DEEPLENS_OCR_LANGUAGE={ocr_lang}
+
 # Local Mode
 OLLAMA_HOST={ollama_host}
 OLLAMA_CHAT_MODEL={ollama_chat}
 OLLAMA_REWRITER_MODEL={ollama_chat}
-JINA_CLIP_MODEL={jina_clip}
+DEEPLENS_LOCAL_EMBEDDING_MODEL={local_embed}
 DEEPLENS_WHISPER_MODEL_SIZE={whisper_size}
 
 # Cloud Mode
@@ -245,7 +268,7 @@ POSTGRES_PASSWORD={pg_pass}
         self.settings.ollama_host = ollama_host
         self.settings.ollama_chat_model = ollama_chat
         self.settings.ollama_rewriter_model = ollama_chat
-        self.settings.jina_clip_model = jina_clip
+        self.settings.local_embedding_model = local_embed
         self.settings.whisper_model_size = whisper_size
         self.settings.gemini_chat_model = gemini_chat
         self.settings.postgres_host = pg_host
@@ -257,6 +280,10 @@ POSTGRES_PASSWORD={pg_pass}
         self.settings.chunk_overlap = chunk_overlap
         self.settings.ingestion_workers = workers
         self.settings.search_top_k = top_k
+        
+        self.settings.enable_ocr = enable_ocr
+        self.settings.ocr_engine = ocr_engine
+        self.settings.ocr_language = ocr_lang
 
         # Recheck directories
         self.settings.ensure_directories()

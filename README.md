@@ -39,7 +39,7 @@ DeepLens uses a **Repository & Factory Pattern** allowing you to hot-swap the en
 | Layer | Mode A: Local Privacy Mode (CPU-friendly) | Mode B: Cloud / CV Showcase Mode |
 |---|---|---|
 | **Vector DB** | **LanceDB** (Embedded, disk-based, zero RAM footprint) | **PostgreSQL + pgvector** (Bundled or remote SQL service) |
-| **Embedding Engine** | **Jina-CLIP-v2** (<1B params, unit-normalized 1024-dim vectors) | **Gemini Text Embedding 004** (3072-dim dense vectors) |
+| **Embedding Engine** | **Configurable local multi-modal model** (defaults to **Jina-CLIP-v2**, <1B params, unit-normalized 1024-dim vectors — set via `DEEPLENS_LOCAL_EMBEDDING_MODEL`) | **Gemini Text Embedding 004** (3072-dim dense vectors) |
 | **Chat LLM / Rewriter** | **Llama-3.2-3B** (or **Phi-4-mini**) running locally via **Ollama** | **Gemini 2.5 Flash** (Generous free tier via AI Studio) |
 | **Audio Transcription** | **faster-whisper** (INT8 quantized CPU execution mode) | **Gemini 2.5 Flash** (Native audio modal processing) |
 | **Document Parsing** | **Docling** (RT-DETR layout engine + Granite-Docling models) | **Docling** (Layout-aware markdown conversion) |
@@ -49,6 +49,7 @@ DeepLens uses a **Repository & Factory Pattern** allowing you to hot-swap the en
 ## ✨ Key Features
 
 - 📑 **Layout-Aware Document Parsing**: Utilizes **Docling** to transform PDFs, DOCX, and XLSX sheets into structured Markdown (intact tables, headers, and codeblocks) before slicing them into structure-aware chunks.
+- 🔤 **Optical Character Recognition (OCR)**: When enabled, text embedded inside images and scanned PDFs is extracted and indexed so screenshots, invoices, memes, and receipts become fully searchable. The pipeline is **efficient and intelligent** — a cheap heuristic pre-filter plus the OCR engine's own text detector skip recognition on text-free images, and results are cached by file hash to avoid re-computation. Configurable engine (`tesseract` or `easyocr`) and language code, with graceful degradation if an OCR dependency is missing.
 - 🎙️ **Decoupled Audio-Visual Pipeline (Local)**:
   - **Visual**: Samples frame streams at 1 FPS using OpenCV, feeding images to Jina-CLIP for visual indexing.
   - **Audio**: Extracts the audio track via `ffmpeg` and runs it through `faster-whisper` for timestamp-aligned transcription.
@@ -107,6 +108,8 @@ You need the following system packages installed and added to your PATH:
 
 - **ffmpeg** (For extracting audio tracks and slicing video clips)
 - **unrar** / **7z** (For parsing RAR/7z archives)
+- **Tesseract OCR** (Optional — enables OCR of images/scanned PDFs if `DEEPLENS_ENABLE_OCR=true`)
+- **PyMuPDF** (Optional — enables rasterizing PDF pages for OCR fallback)
 
 #### macOS
 
