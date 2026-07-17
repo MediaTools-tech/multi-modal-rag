@@ -44,11 +44,14 @@ class JinaClipEngine(EmbeddingEngine):
             self._device = "cuda" if torch.cuda.is_available() else "cpu"
             logger.info("jina_clip.initialize.device", device=self._device)
 
-            # Jina-CLIP-v2 requires trust_remote_code=True
+            # Jina-CLIP-v2 requires trust_remote_code=True. Pass torch_dtype as a
+            # *string*: the model's config does `hasattr(torch, torch_dtype)`,
+            # which crashes with "attribute name must be string, not
+            # 'torch.dtype'" if a torch.dtype object is passed.
             self._model = AutoModel.from_pretrained(
                 self.model_name,
                 trust_remote_code=True,
-                torch_dtype=torch.float32 if self._device == "cpu" else torch.float16
+                torch_dtype="float32" if self._device == "cpu" else "float16"
             ).to(self._device)
             self._model.eval()
 

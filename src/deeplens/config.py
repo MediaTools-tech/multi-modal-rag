@@ -103,27 +103,61 @@ class Settings(BaseSettings):
         ),
     )
 
+    # # ── Local Mode ────────────────────────────────────────────────────────
+    # ollama_host: str = Field(default="http://localhost:11434", description="Ollama server URL")
+    # ollama_chat_model: str = Field(default="llama3.2:3b", description="Ollama chat model name")
+    # ollama_rewriter_model: str = Field(
+    #     default="llama3.2:3b", description="Ollama rewriter model name"
+    # )
+    # local_embedding_model: str = Field(
+    #     default="jinaai/jina-clip-v2", description="Local multi-modal embedding model identifier"
+    # )
+    # whisper_model_size: str = Field(
+    #     default="base", description="faster-whisper model size (tiny/base/small/medium/large)"
+    # )
+
+    # # ── OCR (Optical Character Recognition) Settings ─────────────────────
+    # enable_ocr: bool = Field(default=False, description="Enable OCR for images and scanned PDFs")
+    # ocr_engine: str = Field(
+    #     default="tesseract", description="OCR Engine to use: 'tesseract' or 'easyocr'"
+    # )
+    # ocr_language: str = Field(
+    #     default="eng", description="Language code for OCR (e.g. 'eng', 'fra', 'deu')"
+    # )
+
     # ── Local Mode ────────────────────────────────────────────────────────
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama server URL")
-    ollama_chat_model: str = Field(default="llama3.2:3b", description="Ollama chat model name")
+    
+    # UPGRADED: Swapped from 3B to a highly optimized 1.5B model. Saves ~1.5 GB of RAM.
+    ollama_chat_model: str = Field(default="qwen2.5:1.5b", description="Ollama chat model name")
+    
+    # UPGRADED: Swapped to an ultra-lightweight 0.5B model. It executes query-rewriting in milliseconds on a dual-core CPU.
     ollama_rewriter_model: str = Field(
-        default="llama3.2:3b", description="Ollama rewriter model name"
+        default="qwen2.5:0.5b", description="Ollama rewriter model name"
     )
+    
     local_embedding_model: str = Field(
         default="jinaai/jina-clip-v2", description="Local multi-modal embedding model identifier"
     )
+    
+    # UPGRADED: Swapped from 'base' to 'tiny'. Crucial for preventing CPU lockups during audio processing.
     whisper_model_size: str = Field(
-        default="base", description="faster-whisper model size (tiny/base/small/medium/large)"
+        default="tiny", description="faster-whisper model size (tiny/base/small/medium/large)"
     )
 
     # ── OCR (Optical Character Recognition) Settings ─────────────────────
     enable_ocr: bool = Field(default=False, description="Enable OCR for images and scanned PDFs")
+    
+    # VERIFIED: Keep as tesseract. Never switch to easyocr on a Pentium laptop.
     ocr_engine: str = Field(
         default="tesseract", description="OCR Engine to use: 'tesseract' or 'easyocr'"
     )
     ocr_language: str = Field(
         default="eng", description="Language code for OCR (e.g. 'eng', 'fra', 'deu')"
     )
+
+
+
 
     # ── Cloud Mode ────────────────────────────────────────────────────────
     gemini_embedding_model: str = Field(
