@@ -54,6 +54,7 @@ DeepLens uses a **Repository & Factory Pattern** allowing you to hot-swap the en
   - **Visual**: Samples frame streams at 1 FPS using OpenCV, feeding images to Jina-CLIP for visual indexing.
   - **Audio**: Extracts the audio track via `ffmpeg` and runs it through `faster-whisper` for timestamp-aligned transcription.
 - 🔀 **Agentic RAG State Machine**: Controlled using a **LangGraph state graph** rather than linear chains. A feedback edge loops back to the Query Rewriter if search results fail relevance filters.
+- 📚 **Summary-Aware Hybrid Search**: Documents are indexed both as fine-grained **chunks** *and* as a single per-file **summary** record. Retrieval fuses semantic (vector), lexical (BM25-style keyword), and document-summary signals with **Reciprocal Rank Fusion**, so you can locate *the file* from a description ("the story about a man who owns a big mansion") — not just scattered passages. See [Summary-Aware Hybrid Search](#-summary-aware-hybrid-search).
 - 🔌 **Model Context Protocol (MCP)**: Features a built-in FastMCP Server. Exposes semantic retrieval hooks as tools to Cursor, Claude Desktop, and VS Code.
 - 💻 **Responsive PySide6 GUI**: Clean 3-panel layout (Left checkbox filter tree, Center chat panel, Right interactive preview panel) using background `QThread` workers to prevent thread blocking.
 
@@ -226,10 +227,83 @@ Add this to your Claude Desktop configuration file (typically `~/.profile` or `~
 
 ### Exposed MCP Tools
 
-- `semantic_search(query, folder_filter?, file_type_filter?, top_k?)`: Run a similarity query over indexed documents and retrieve a citations-enrich answer.
+- `semantic_search(query, folder_filter?, file_type_filter?, search_mode?, top_k?)`: Run a similarity query over indexed documents and retrieve a citations-enriched answer. `search_mode` is `hybrid` (default), `summary`, or `chunk`.
+- `find_documents(description, folder_filter?, file_type_filter?, top_k?)`: Locate whole files whose content matches a natural-language description, returning each match's path and generated summary — ideal for "find the story about a man who owns a big mansion".
 - `list_indexed_folders()`: Return a list of all registered directories.
 - `get_file_chunks(file_path)`: Return all raw text chunks and corresponding timestamps for a file.
 - `get_indexing_status()`: Get current database metrics and counts.
+
+---
+
+## 📚 Summary-Aware Hybrid Search
+
+### The problem
+
+DeepLens stores every file as a set of **chunks** (passages, frames, transcript
+segments). That is ideal for *answering* a question grounded in a passage, but it
+cannot, by itself, **find a whole document from a description of its content**.
+Given thousands of bank statements, letters, books, and stories, a query like
+*"story of a man who owns a big mansion"* would scatter top matches across many
+chunks; you would get a few relevant passages, not "the file."
+
+The fix is a **document-level signal** in addition to the chunk-level one. DeepLens
+generates one concise **summary** per text-bearing file at ingestion time and stores
+it as a dedicated `record_type="summary"` vector record that still points back to the
+source `absolute_path`. The retriever can therefore match a description to a *file*,
+then attach the supporting chunks for grounding.
+
+### Why not RAPTOR-Lite / per-file K-Means clustering?
+
+Recursive clustering (RAPTOR) — summarizing K-Means clusters of a file's chunks into a
+tree — is a powerful technique for **answering questions that span an entire long
+document** (e.g. a book), because the answer must be aggregated across the whole work.
+It is the wrong tool for *locating the file that matches a description*:
+
+- A single per-file summary is the exact-right granularity for "find this document" —
+  a cluster summary is not a document summary and does not map 1:1 to "the file".
+- Per-file K-Means forces you to choose `k` (even "dynamically" from file size) and to
+  re-cluster on every re-index, with no clear payoff for file-finding.
+- It multiplies storage and latency for marginal recall gain on the locate-a-file task.
+
+We recommend **summary records + hybrid fusion** as the default, and keep RAPTOR as a
+possible *future* answer-aggregation tier (see Roadmap) rather than the retriever.
+
+### How retrieval works
+
+For each query, `search_mode` selects the strategy (default `hybrid`):
+
+| Mode | Behaviour | Best for |
+|------|-----------|----------|
+| `chunk` | Passage-level ANN only (legacy). | Precise in-document lookups. |
+| `summary` | Matches only per-file summary records. | "Find the document that matches this description." |
+| `hybrid` | Fuses summary + chunk + lexical signals via RRF. | Mixed / natural-language queries. |
+
+The hybrid path builds three ranked lists and fuses them with **Reciprocal Rank
+Fusion** (`1 / (k + rank)`):
+
+1. **Vector** — semantic ANN over all records (chunks + summaries).
+2. **Lexical** — BM25-style keyword overlap, which catches distinctive terms and
+   proper nouns (e.g. *"mansion"*, character names) that pure embedding search may blur.
+3. **Summary** — vector ranking restricted to file-level summary records, giving
+   documents a second chance to surface for description-style queries.
+
+Results are also grouped into **`FileSearchGroup`** objects (file path, generated
+summary, best score, top supporting chunks) so the answer can point you straight at the
+document.
+
+### Configuration
+
+| Setting | Env var | Default | Purpose |
+|---------|---------|---------|---------|
+| `search_mode` | `DEEPLENS_SEARCH_MODE` | `hybrid` | `chunk` / `summary` / `hybrid`. |
+| `hybrid_lexical_weight` | `DEEPLENS_HYBRID_LEXICAL_WEIGHT` | `0.3` | Weight of the lexical signal in fusion. |
+| `hybrid_rrf_k` | `DEEPLENS_HYBRID_RRF_K` | `60` | RRF constant (higher = ranks matter less). |
+| `enable_document_summaries` | `DEEPLENS_ENABLE_DOCUMENT_SUMMARIES` | `true` | Generate + index per-file summary records. |
+| `summary_max_chars` | `DEEPLENS_SUMMARY_MAX_CHARS` | `4000` | Max source text fed to the summarizer. |
+
+> **Re-index note**: enabling summaries on an *existing* index adds new `record_type`
+> / `summary` columns (pgvector migrates automatically; LanceDB migrates best-effort at
+> open). To populate summaries for already-indexed files, re-index the folder.
 
 ---
 

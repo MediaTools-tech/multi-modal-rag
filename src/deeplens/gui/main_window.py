@@ -179,7 +179,9 @@ class MainWindow(QMainWindow):
         await self.chat.initialize()
         
         self.pipeline = SearchPipeline(self.repo, self.embedder, self.chat, self.settings)
-        self.ingest_queue = IngestionQueue(self.repo, self.embedder, self.settings)
+        self.ingest_queue = IngestionQueue(
+            self.repo, self.embedder, self.settings, chat_engine=self.chat
+        )
         
         # Launch background ingestion worker loop
         self.ingest_thread = IngestWorker(self.ingest_queue)

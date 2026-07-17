@@ -71,6 +71,7 @@ class PgVectorRepository(DocumentRepository):
             await conn.execute(f"""
                 ALTER TABLE {self._table_name}
                 ADD COLUMN IF NOT EXISTS content TEXT,
+                ADD COLUMN IF NOT EXISTS record_type TEXT,
                 ADD COLUMN IF NOT EXISTS absolute_path TEXT,
                 ADD COLUMN IF NOT EXISTS filename TEXT,
                 ADD COLUMN IF NOT EXISTS parent_directory TEXT,
@@ -83,7 +84,8 @@ class PgVectorRepository(DocumentRepository):
                 ADD COLUMN IF NOT EXISTS created_at TEXT,
                 ADD COLUMN IF NOT EXISTS file_modified_at TEXT,
                 ADD COLUMN IF NOT EXISTS file_hash TEXT,
-                ADD COLUMN IF NOT EXISTS metadata_json TEXT;
+                ADD COLUMN IF NOT EXISTS metadata_json TEXT,
+                ADD COLUMN IF NOT EXISTS summary TEXT;
             """)
 
             # Create HNSW indexes for fast approximate search
@@ -135,6 +137,7 @@ class PgVectorRepository(DocumentRepository):
                     r.id,
                     r.vector,
                     r.content,
+                    r.record_type,
                     r.absolute_path,
                     r.filename,
                     r.parent_directory,
@@ -148,18 +151,20 @@ class PgVectorRepository(DocumentRepository):
                     r.file_modified_at,
                     r.file_hash,
                     r.metadata_json,
+                    r.summary,
                 ))
 
             # Batch insert using executemany
             query = f"""
                 INSERT INTO {self._table_name} (
-                    id, vector, content, absolute_path, filename, parent_directory,
-                    file_type, mime_type, chunk_index, total_chunks, timestamp_start, timestamp_end,
-                    created_at, file_modified_at, file_hash, metadata_json
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    id, vector, content, record_type, absolute_path, filename, parent_directory, file_type, mime_type,
+                    chunk_index, total_chunks, timestamp_start, timestamp_end, created_at, file_modified_at, file_hash,
+                    metadata_json, summary
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                 ON CONFLICT (id) DO UPDATE SET
                     vector = EXCLUDED.vector,
                     content = EXCLUDED.content,
+                    record_type = EXCLUDED.record_type,
                     absolute_path = EXCLUDED.absolute_path,
                     filename = EXCLUDED.filename,
                     parent_directory = EXCLUDED.parent_directory,
@@ -172,7 +177,8 @@ class PgVectorRepository(DocumentRepository):
                     created_at = EXCLUDED.created_at,
                     file_modified_at = EXCLUDED.file_modified_at,
                     file_hash = EXCLUDED.file_hash,
-                    metadata_json = EXCLUDED.metadata_json;
+                    metadata_json = EXCLUDED.metadata_json,
+                    summary = EXCLUDED.summary;
             """
             await conn.executemany(query, rows)
             
@@ -185,8 +191,12 @@ class PgVectorRepository(DocumentRepository):
         top_k: int = 10,
         folder_filter: str | None = None,
         file_type_filter: str | None = None,
+        record_types: list[str] | None = None,
     ) -> list[SearchResult]:
-        """Perform similarity search using cosine distance (<=> operator in pgvector)."""
+        """Perform similarity search using cosine distance (<=> operator in pgvector).
+
+        See :meth:`LanceDBRepository.search` for the meaning of ``record_types``.
+        """
         if not self._pool:
             return []
 
@@ -195,7 +205,7 @@ class PgVectorRepository(DocumentRepository):
         # Cosine similarity = 1 - (vector <=> query_vector)
         where_clauses = []
         params: list[Any] = [query_vector]
-        
+
         param_counter = 2
         if folder_filter:
             where_clauses.append(f"parent_directory LIKE ${param_counter}")
@@ -204,6 +214,10 @@ class PgVectorRepository(DocumentRepository):
         if file_type_filter:
             where_clauses.append(f"file_type = ${param_counter}")
             params.append(file_type_filter)
+            param_counter += 1
+        if record_types:
+            where_clauses.append(f"record_type = ANY(${param_counter})")
+            params.append(record_types)
             param_counter += 1
 
         where_expr = ""
@@ -221,7 +235,7 @@ class PgVectorRepository(DocumentRepository):
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
-            
+
         results = []
         for i, row in enumerate(rows):
             # Parse row into record

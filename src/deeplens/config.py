@@ -56,6 +56,34 @@ class Settings(BaseSettings):
     relevance_threshold: float = Field(
         default=0.65, ge=0.0, le=1.0, description="Min cosine similarity for context pass"
     )
+    # Retrieval strategy used to answer a query. "chunk" does pure passage-level
+    # ANN (legacy behaviour). "summary" searches only document-level summary
+    # records (best for "find the file that matches this description"). "hybrid"
+    # fuses summary, chunk, and lexical signals — recommended for mixed queries.
+    search_mode: str = Field(
+        default="hybrid",
+        description="Retrieval strategy: 'chunk', 'summary', or 'hybrid'",
+    )
+    hybrid_lexical_weight: float = Field(
+        default=0.3, ge=0.0, le=1.0,
+        description="Weight of the lexical (BM25-style) signal within hybrid fusion",
+    )
+    hybrid_rrf_k: int = Field(
+        default=60, ge=1, le=200,
+        description="Reciprocal Rank Fusion constant (higher = ranks matter less)",
+    )
+
+    # ── Document Summaries ────────────────────────────────────────────────
+    # When enabled, a concise per-file summary is generated at ingestion time
+    # and stored as a dedicated 'summary' vector record so documents can be
+    # located by a description of their content (file-level retrieval).
+    enable_document_summaries: bool = Field(
+        default=True, description="Generate + index a per-file summary record"
+    )
+    summary_max_chars: int = Field(
+        default=4000, ge=500, le=20000,
+        description="Max characters of source text fed to the summarizer",
+    )
 
     # ── Local Mode ────────────────────────────────────────────────────────
     ollama_host: str = Field(default="http://localhost:11434", description="Ollama server URL")

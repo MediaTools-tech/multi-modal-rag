@@ -34,6 +34,8 @@ class SearchState(TypedDict, total=False):
     retry_count: int
     folder_filter: str | None
     file_type_filter: str | None
+    search_mode: str | None
+    file_groups: list[Any]
     conversation_history: list[dict[str, str]]
     total_time_ms: float
     
@@ -106,9 +108,19 @@ class SearchPipeline:
         query: str,
         folder_filter: str | None = None,
         file_type_filter: str | None = None,
+        search_mode: str | None = None,
         history: list[dict[str, str]] | None = None
     ) -> SearchResponse:
-        """Execute the LangGraph search pipeline."""
+        """Execute the LangGraph search pipeline.
+
+        Args:
+            query: The user's natural-language query.
+            folder_filter: Optional directory subtree to scope the search.
+            file_type_filter: Optional file-type category filter.
+            search_mode: Optional override for ``settings.search_mode``
+                (``"chunk"``, ``"summary"``, or ``"hybrid"``).
+            history: Optional conversation history for the rewriter.
+        """
         start_time = time.perf_counter()
 
         initial_state: SearchState = {
@@ -120,6 +132,8 @@ class SearchPipeline:
             "retry_count": 0,
             "folder_filter": folder_filter,
             "file_type_filter": file_type_filter,
+            "search_mode": search_mode or self.settings.search_mode,
+            "file_groups": [],
             "conversation_history": history or [],
             "settings": self.settings,
             "repo": self.repository,
@@ -143,7 +157,8 @@ class SearchPipeline:
                 results=final_state.get("results", []),
                 answer=final_state.get("answer", ""),
                 retry_count=final_state.get("retry_count", 0),
-                total_time_ms=elapsed_ms
+                total_time_ms=elapsed_ms,
+                file_groups=final_state.get("file_groups", []),
             )
 
         except Exception as e:

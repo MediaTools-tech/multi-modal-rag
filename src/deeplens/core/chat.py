@@ -110,3 +110,32 @@ class ChatEngine(ABC):
 
         response = await self.generate(prompt, system_prompt=system)
         return response.content.strip().strip('"').strip("'")
+
+    async def summarize_document(self, text: str, filename: str = "") -> str:
+        """Produce a concise, content-level summary of a document.
+
+        Used to build per-file ``summary`` vector records that enable
+        document-level ("find the file that matches this description") retrieval.
+        Implementations may override, but the default uses the generic
+        ``generate`` endpoint with a summarization prompt.
+
+        Args:
+            text: Representative source text (already truncated by the caller).
+            filename: Optional source filename for context.
+
+        Returns:
+            A concise summary (a few sentences).
+        """
+        system = (
+            "You are a document summarization assistant. Given the beginning of a file, "
+            "write a concise 2-4 sentence summary that captures what the document IS and "
+            "its main subject matter (topic, genre, key entities, and intent).\n\n"
+            "Rules:\n"
+            "1. Focus on what the document is about, not generic boilerplate.\n"
+            "2. Preserve distinctive proper nouns, names, places, and key themes.\n"
+            "3. Output ONLY the summary — no preamble, no quotes, no headings.\n"
+        )
+
+        context = f"Filename: {filename}\n\nDocument excerpt:\n{text}\n\nSummary:"
+        response = await self.generate(context, system_prompt=system)
+        return response.content.strip().strip('"').strip("'")

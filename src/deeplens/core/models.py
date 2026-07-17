@@ -102,12 +102,22 @@ def classify_file(path: Path) -> FileType:
     return EXTENSION_MAP.get(suffix, FileType.UNKNOWN)
 
 
+# Record categories stored in the vector database.
+class RecordType(str, Enum):
+    """Discriminator for what a VectorRecord represents."""
+
+    CHUNK = "chunk"      # A passage / frame / transcript segment (default).
+    SUMMARY = "summary"  # A concise whole-file summary used for file-level retrieval.
+
+
 @dataclass
 class VectorRecord:
     """A single vector record stored in the database.
 
     Each record represents one chunk of a source file — a text passage,
-    a single image, a video frame, or an audio transcript segment.
+    a single image, a video frame, or an audio transcript segment — or, when
+    ``record_type`` is ``SUMMARY``, a concise whole-file summary used for
+    document-level ("find this file by its description") retrieval.
     """
 
     # Identity
@@ -117,7 +127,10 @@ class VectorRecord:
     vector: list[float] = field(default_factory=list)
 
     # Content
-    content: str = ""  # Raw text chunk, image caption, or transcript segment
+    content: str = ""  # Raw text chunk, image caption, transcript segment, or summary
+
+    # Record discriminator
+    record_type: str = RecordType.CHUNK.value
 
     # Source file metadata
     absolute_path: str = ""
@@ -144,12 +157,17 @@ class VectorRecord:
     # Extensible metadata
     metadata_json: str = "{}"  # JSON blob for EXIF, etc.
 
+    # Document summary (populated when record_type == SUMMARY; mirrors content
+    # for convenience so it can be surfaced directly in results).
+    summary: str = ""
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to a flat dictionary for database insertion."""
         return {
             "id": self.id,
             "vector": self.vector,
             "content": self.content,
+            "record_type": self.record_type,
             "absolute_path": self.absolute_path,
             "filename": self.filename,
             "parent_directory": self.parent_directory,
@@ -163,6 +181,7 @@ class VectorRecord:
             "file_modified_at": self.file_modified_at,
             "file_hash": self.file_hash,
             "metadata_json": self.metadata_json,
+            "summary": self.summary,
         }
 
     @classmethod
@@ -181,6 +200,24 @@ class SearchResult:
 
 
 @dataclass
+class FileSearchGroup:
+    """A file-level grouping of hybrid search results.
+
+    When retrieval is summary- or file-aware, results are clustered by source
+    file so the user can be pointed at *the document* (with its summary) rather
+    than a scattered set of chunks. ``chunk_results`` holds the supporting
+    passage-level hits that ground the match.
+    """
+
+    absolute_path: str = ""
+    filename: str = ""
+    file_type: str = ""
+    summary: str = ""
+    best_score: float = 0.0
+    chunk_results: list[SearchResult] = field(default_factory=list)
+
+
+@dataclass
 class SearchResponse:
     """Complete search response including results and metadata."""
 
@@ -190,6 +227,8 @@ class SearchResponse:
     answer: str = ""  # LLM-generated answer
     retry_count: int = 0
     total_time_ms: float = 0.0
+    # File-level grouping produced by summary / hybrid retrieval.
+    file_groups: list[FileSearchGroup] = field(default_factory=list)
 
 
 @dataclass

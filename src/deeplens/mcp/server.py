@@ -56,6 +56,7 @@ async def semantic_search(
     query: str,
     folder_filter: str | None = None,
     file_type_filter: str | None = None,
+    search_mode: str = "hybrid",
     top_k: int = 10
 ) -> str:
     """Perform a conversational semantic query across registered local files.
@@ -64,6 +65,8 @@ async def semantic_search(
         query: The conversational search query.
         folder_filter: Optional directory path subtree to limit search.
         file_type_filter: Optional file category (document, image, audio, video).
+        search_mode: Retrieval strategy - "hybrid" (recommended), "summary"
+            (find the file by its description), or "chunk" (passage-level only).
         top_k: Number of search results to evaluate.
     """
     try:
@@ -79,6 +82,7 @@ async def semantic_search(
             query=query,
             folder_filter=folder_filter,
             file_type_filter=file_type_filter,
+            search_mode=search_mode,
         )
         
         # Format response as text for LLM client
@@ -87,6 +91,57 @@ async def semantic_search(
     except Exception as e:
         logger.error("mcp.tool.semantic_search.failed", error=str(e))
         return f"Error executing semantic search: {str(e)}"
+
+
+@mcp.tool()
+async def find_documents(
+    description: str,
+    folder_filter: str | None = None,
+    file_type_filter: str | None = None,
+    top_k: int = 10
+) -> str:
+    """Locate whole files whose content matches a natural-language description.
+
+    Unlike semantic_search (which returns passages), this returns the best-matching
+    *documents* together with their generated summaries — ideal for queries like
+    "find the story about a man who owns a big mansion".
+
+    Args:
+        description: A description of the document you are looking for.
+        folder_filter: Optional directory path subtree to limit search.
+        file_type_filter: Optional file category (document, image, audio, video).
+        top_k: Maximum number of files to return.
+    """
+    try:
+        pipeline = await get_pipeline()
+        top_k = max(1, min(50, top_k))
+        pipeline.settings.search_top_k = top_k
+
+        response = await pipeline.search(
+            query=description,
+            folder_filter=folder_filter,
+            file_type_filter=file_type_filter,
+            search_mode="summary",
+        )
+
+        if not response.file_groups:
+            return (
+                "No documents matched that description. The folder may not be indexed, "
+                "or document summaries may be disabled (DEEPLENS_ENABLE_DOCUMENT_SUMMARIES)."
+            )
+
+        lines = []
+        for g in response.file_groups:
+            lines.append(
+                f"• {g.filename}  (match score {g.best_score:.2f})\n"
+                f"  Path: {g.absolute_path}\n"
+                f"  Summary: {g.summary}"
+            )
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error("mcp.tool.find_documents.failed", error=str(e))
+        return f"Error locating documents: {str(e)}"
 
 
 @mcp.tool()

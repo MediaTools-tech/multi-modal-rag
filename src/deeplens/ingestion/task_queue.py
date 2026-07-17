@@ -14,10 +14,12 @@ from PIL import Image
 import structlog
 
 from deeplens.config import Settings
+from deeplens.core.chat import ChatEngine
 from deeplens.core.embedding import EmbeddingEngine
 from deeplens.core.models import FileType, IngestionJob, IndexingProgress, VectorRecord
 from deeplens.core.repository import DocumentRepository
 from deeplens.ingestion.router import FileRouter
+from deeplens.ingestion.summarizer import DocumentSummarizer
 
 # Import chunkers
 from deeplens.ingestion.chunkers.document import DocumentChunker
@@ -37,11 +39,14 @@ class IngestionQueue:
         repository: DocumentRepository,
         embedding_engine: EmbeddingEngine,
         settings: Settings,
+        chat_engine: ChatEngine | None = None,
         progress_callback: Callable[[IndexingProgress], None] | None = None
     ) -> None:
         self.repository = repository
         self.embedding_engine = embedding_engine
         self.settings = settings
+        self.chat_engine = chat_engine
+        self.summarizer = DocumentSummarizer(chat_engine, settings)
         self.progress_callback = progress_callback
         
         self.queue: asyncio.Queue[IngestionJob] = asyncio.Queue()
@@ -206,6 +211,19 @@ class IngestionQueue:
 
         if not records:
             return 0
+
+        # 1b. Document-level summary record (file-level retrieval signal).
+        #     Appended before embedding so the summary text also gets a vector.
+        try:
+            summary_record = await self.summarizer.build_summary_record(records)
+            if summary_record is not None:
+                records.append(summary_record)
+                logger.info(
+                    "ingestion_queue.summary_created",
+                    file=str(job.source_path),
+                )
+        except Exception as e:
+            logger.warn("ingestion_queue.summary_failed", file=str(job.source_path), error=str(e))
 
         # 2. Embedding Generation
         # For each record, generate vector embedding

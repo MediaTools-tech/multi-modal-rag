@@ -39,6 +39,7 @@ class LanceDBRepository(DocumentRepository):
             pa.field("id", pa.string(), nullable=False),
             pa.field("vector", pa.list_(pa.float32(), dim), nullable=False),
             pa.field("content", pa.string()),
+            pa.field("record_type", pa.string()),
             pa.field("absolute_path", pa.string()),
             pa.field("filename", pa.string()),
             pa.field("parent_directory", pa.string()),
@@ -52,7 +53,29 @@ class LanceDBRepository(DocumentRepository):
             pa.field("file_modified_at", pa.string()),
             pa.field("file_hash", pa.string()),
             pa.field("metadata_json", pa.string()),
+            pa.field("summary", pa.string()),
         ])
+
+    def _ensure_summary_columns(self) -> None:
+        """Best-effort migration: add record_type/summary columns to existing tables."""
+        if self._table is None:
+            return
+        existing = {f.name for f in self._table.schema}
+        missing = [c for c in ("record_type", "summary") if c not in existing]
+        if not missing:
+            return
+        try:
+            # LanceDB add_columns: name -> default literal value.
+            defaults = {c: ("" if c == "summary" else "chunk") for c in missing}
+            self._table.add_columns(defaults)  # type: ignore
+            logger.info("lancedb.migrate.added_columns", columns=missing)
+        except Exception as e:
+            logger.warn(
+                "lancedb.migrate.failed",
+                columns=missing,
+                error=str(e),
+                hint="Re-index the folder to add summary support.",
+            )
 
     async def initialize(self) -> None:
         """Connect to LanceDB and ensure the table exists."""
@@ -63,6 +86,7 @@ class LanceDBRepository(DocumentRepository):
             if self._table_name in self._conn.table_names():
                 self._table = self._conn.open_table(self._table_name)
                 logger.info("lancedb.initialize.open_existing", table=self._table_name)
+                self._ensure_summary_columns()
             else:
                 schema = self._get_schema()
                 self._table = self._conn.create_table(
@@ -106,8 +130,20 @@ class LanceDBRepository(DocumentRepository):
         top_k: int = 10,
         folder_filter: str | None = None,
         file_type_filter: str | None = None,
+        record_types: list[str] | None = None,
     ) -> list[SearchResult]:
-        """Search vector table with optional filters."""
+        """Search vector table with optional filters.
+
+        Args:
+            query_vector: Query embedding.
+            top_k: Max number of results to return.
+            folder_filter: Limit to a directory subtree.
+            file_type_filter: Limit to a file type category.
+            record_types: If provided, only return records whose ``record_type``
+                is in this list (e.g. ``["summary"]`` for file-level retrieval).
+                Filtering is done in-memory after a larger candidate fetch so the
+                method works even on schemas created before summary columns existed.
+        """
         if self._table is None:
             raise RuntimeError("Repository not initialized.")
 
@@ -121,28 +157,32 @@ class LanceDBRepository(DocumentRepository):
 
         where_expr = " AND ".join(where_clauses) if where_clauses else None
 
+        # When filtering by record_type we over-fetch then trim in Python so we
+        # still return up to top_k matches.
+        fetch_limit = top_k * 5 if record_types else top_k
+
         def _query() -> list[SearchResult]:
             q = self._table.search(query_vector).metric("cosine")
             if where_expr:
                 q = q.where(where_expr)
-            
+
             # Execute search and fetch pandas DataFrame
-            results_df = q.limit(top_k).to_pandas()
-            
+            results_df = q.limit(fetch_limit).to_pandas()
+
             output = []
             for i, row in results_df.iterrows():
                 # LanceDB cosine search returns distance (usually L2 or cosine distance where 0 is identical)
                 # Cosine similarity = 1 - cosine distance
                 dist = row.get("_distance", 1.0)
                 score = max(0.0, min(1.0, 1.0 - float(dist)))
-                
+
                 # Reconstruct VectorRecord
                 record_dict = row.to_dict()
                 # Clean up distance column
                 record_dict.pop("_distance", None)
                 # Convert vector back to float list
                 record_dict["vector"] = list(row["vector"])
-                
+
                 # Check for None values for float fields
                 for f in ("timestamp_start", "timestamp_end"):
                     if record_dict.get(f) is not None and (
@@ -151,7 +191,15 @@ class LanceDBRepository(DocumentRepository):
                         record_dict[f] = None
 
                 rec = VectorRecord.from_dict(record_dict)
+
+                # In-memory record_type filter (tolerant of pre-summary schemas).
+                if record_types is not None:
+                    if rec.record_type not in record_types:
+                        continue
+
                 output.append(SearchResult(record=rec, score=score, rank=len(output) + 1))
+                if len(output) >= top_k:
+                    break
             return output
 
         return await asyncio.to_thread(_query)

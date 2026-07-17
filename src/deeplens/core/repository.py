@@ -51,6 +51,7 @@ class DocumentRepository(ABC):
         top_k: int = 10,
         folder_filter: str | None = None,
         file_type_filter: str | None = None,
+        record_types: list[str] | None = None,
     ) -> list[SearchResult]:
         """Perform ANN search with optional metadata filtering.
 
@@ -59,6 +60,8 @@ class DocumentRepository(ABC):
             top_k: Number of results to return.
             folder_filter: If set, only search within this directory subtree.
             file_type_filter: If set, only search this file type (document/image/audio/video).
+            record_types: If set, only return records whose ``record_type`` is in
+                this list (e.g. ``["summary"]`` for document-level retrieval).
 
         Returns:
             List of SearchResult objects sorted by relevance.
