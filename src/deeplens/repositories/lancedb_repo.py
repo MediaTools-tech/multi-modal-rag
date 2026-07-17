@@ -7,7 +7,7 @@ with low memory overhead.
 from __future__ import annotations
 
 import asyncio
-import os
+from math import isnan
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ import structlog
 from deeplens.config import Settings
 from deeplens.core.models import SearchResult, VectorRecord
 from deeplens.core.repository import DocumentRepository
+from deeplens.search.lexical import bm25_scores, tokenize
 
 logger = structlog.get_logger(__name__)
 
@@ -77,6 +78,33 @@ class LanceDBRepository(DocumentRepository):
                 hint="Re-index the folder to add summary support.",
             )
 
+    def _ensure_fts_index(self) -> None:
+        """Best-effort creation of a LanceDB full-text search index on ``content``."""
+        if self._table is None:
+            return
+        try:
+            self._table.create_fts_index("content")
+            logger.info("lancedb.fts_index.ready")
+        except Exception as e:
+            logger.warn(
+                "lancedb.fts_index.failed",
+                error=str(e),
+                hint="Will fall back to an in-Python BM25 scan for lexical search.",
+            )
+
+    def _row_to_search_result(self, row: Any, score: float, *, drop_extra: tuple[str, ...] = ("_distance", "_score")) -> SearchResult:
+        """Convert a LanceDB result row (pandas Series / mapping) to a SearchResult."""
+        record_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        for col in drop_extra:
+            record_dict.pop(col, None)
+        record_dict["vector"] = list(record_dict.get("vector") or [])
+        for f in ("timestamp_start", "timestamp_end"):
+            v = record_dict.get(f)
+            if v is not None and isinstance(v, float) and isnan(v):
+                record_dict[f] = None
+        rec = VectorRecord.from_dict(record_dict)
+        return SearchResult(record=rec, score=score, rank=0)
+
     async def initialize(self) -> None:
         """Connect to LanceDB and ensure the table exists."""
         def _init() -> None:
@@ -87,6 +115,7 @@ class LanceDBRepository(DocumentRepository):
                 self._table = self._conn.open_table(self._table_name)
                 logger.info("lancedb.initialize.open_existing", table=self._table_name)
                 self._ensure_summary_columns()
+                self._ensure_fts_index()
             else:
                 schema = self._get_schema()
                 self._table = self._conn.create_table(
@@ -176,31 +205,89 @@ class LanceDBRepository(DocumentRepository):
                 dist = row.get("_distance", 1.0)
                 score = max(0.0, min(1.0, 1.0 - float(dist)))
 
-                # Reconstruct VectorRecord
-                record_dict = row.to_dict()
-                # Clean up distance column
-                record_dict.pop("_distance", None)
-                # Convert vector back to float list
-                record_dict["vector"] = list(row["vector"])
-
-                # Check for None values for float fields
-                for f in ("timestamp_start", "timestamp_end"):
-                    if record_dict.get(f) is not None and (
-                        isinstance(record_dict[f], float) and os.isnan(record_dict[f])
-                    ):
-                        record_dict[f] = None
-
-                rec = VectorRecord.from_dict(record_dict)
+                rec = self._row_to_search_result(row, score)
 
                 # In-memory record_type filter (tolerant of pre-summary schemas).
                 if record_types is not None:
-                    if rec.record_type not in record_types:
+                    if rec.record.record_type not in record_types:
                         continue
 
-                output.append(SearchResult(record=rec, score=score, rank=len(output) + 1))
+                output.append(rec)
+                rec.rank = len(output)
                 if len(output) >= top_k:
                     break
             return output
+
+        return await asyncio.to_thread(_query)
+
+    async def search_lexical(
+        self,
+        query: str,
+        top_k: int = 50,
+        folder_filter: str | None = None,
+        file_type_filter: str | None = None,
+    ) -> list[SearchResult]:
+        """Corpus-wide lexical search.
+
+        Uses the LanceDB FTS index when available; falls back to an in-Python
+        BM25 scan over the (filtered) table so keyword search still covers every
+        document when the FTS index could not be built.
+        """
+        if self._table is None:
+            raise RuntimeError("Repository not initialized.")
+
+        where_clauses = []
+        if folder_filter:
+            where_clauses.append(f"parent_directory LIKE '{folder_filter}%'")
+        if file_type_filter:
+            where_clauses.append(f"file_type = '{file_type_filter}'")
+        where_expr = " AND ".join(where_clauses) if where_clauses else None
+
+        def _query() -> list[SearchResult]:
+            # Preferred path: native full-text search index.
+            try:
+                q = self._table.search(query, query_type="fts")
+                if where_expr:
+                    q = q.where(where_expr)
+                df = q.limit(top_k).to_pandas()
+                results: list[SearchResult] = []
+                for _, row in df.iterrows():
+                    raw = float(row.get("_score", 0.0) or 0.0)
+                    rec = self._row_to_search_result(row, abs(raw))
+                    results.append(rec)
+                max_score = max((r.score for r in results), default=1.0) or 1.0
+                for r in results:
+                    r.score = r.score / max_score if max_score > 0 else 0.0
+                results.sort(key=lambda r: r.score, reverse=True)
+                for i, r in enumerate(results):
+                    r.rank = i + 1
+                return results
+            except Exception as e:
+                logger.warn("lancedb.search_lexical.fts_failed", error=str(e))
+
+            # Fallback: load filtered rows and score with in-Python BM25.
+            q = self._table.search()
+            if where_expr:
+                q = q.where(where_expr)
+            df = q.to_pandas()
+            if df.empty:
+                return []
+
+            docs = [(str(row["id"]), str(row.get("content") or "")) for _, row in df.iterrows()]
+            scores = bm25_scores(tokenize(query), docs)
+            ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+            max_score = ranked[0][1] if ranked and ranked[0][1] > 0 else 1.0
+
+            by_id = {str(row["id"]): row for _, row in df.iterrows()}
+            results = []
+            for doc_id, sc in ranked:
+                if sc <= 0:
+                    continue
+                rec = self._row_to_search_result(by_id[doc_id], sc / max_score)
+                results.append(rec)
+            for i, r in enumerate(results):
+                r.rank = i + 1
+            return results
 
         return await asyncio.to_thread(_query)
 

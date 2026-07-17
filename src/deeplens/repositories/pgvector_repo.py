@@ -105,6 +105,18 @@ class PgVectorRepository(DocumentRepository):
                 except Exception as e:
                     logger.warn("pgvector.initialize.index_creation_failed", error=str(e))
 
+            # Full-text search: a stored tsvector column + GIN index gives a
+            # real corpus-wide keyword index (covers every document, not just
+            # the vector top-k).
+            await conn.execute(f"""
+                ALTER TABLE {self._table_name}
+                ADD COLUMN IF NOT EXISTS content_tsv tsvector
+                GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED;
+            """)
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_docs_tsv ON {self._table_name} USING GIN(content_tsv);"
+            )
+
             # Regular indexes for metadata filters
             await conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_docs_parent_dir ON {self._table_name} (parent_directory);"
@@ -262,6 +274,66 @@ class PgVectorRepository(DocumentRepository):
             rec = VectorRecord.from_dict(rec_dict)
             results.append(SearchResult(record=rec, score=score, rank=i + 1))
 
+        return results
+
+    async def search_lexical(
+        self,
+        query: str,
+        top_k: int = 50,
+        folder_filter: str | None = None,
+        file_type_filter: str | None = None,
+    ) -> list[SearchResult]:
+        """Corpus-wide lexical search using Postgres full-text search (tsvector)."""
+        if not self._pool:
+            return []
+
+        params: list[Any] = [query]  # $1: the keyword query
+        where_clauses = ["content_tsv @@ plainto_tsquery('english', $1)"]
+        param_counter = 2
+        if folder_filter:
+            where_clauses.append(f"parent_directory LIKE ${param_counter}")
+            params.append(f"{folder_filter}%")
+            param_counter += 1
+        if file_type_filter:
+            where_clauses.append(f"file_type = ${param_counter}")
+            params.append(file_type_filter)
+            param_counter += 1
+
+        where_expr = " AND ".join(where_clauses)
+        query_sql = f"""
+            SELECT *, ts_rank_cd(content_tsv, plainto_tsquery('english', $1)) AS lex_score
+            FROM {self._table_name}
+            WHERE {where_expr}
+            ORDER BY lex_score DESC
+            LIMIT ${param_counter};
+        """
+        params.append(top_k)
+
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(query_sql, *params)
+        except Exception as e:
+            logger.warn("pgvector.search_lexical.failed", error=str(e))
+            return []
+
+        results: list[SearchResult] = []
+        raw_scores = [float(row["lex_score"] or 0.0) for row in rows]
+        max_score = max(raw_scores) if raw_scores else 1.0
+        for i, row in enumerate(rows):
+            rec_dict = dict(row)
+            rec_dict.pop("lex_score", None)
+            vec_val = rec_dict["vector"]
+            if isinstance(vec_val, str):
+                rec_dict["vector"] = [float(x) for x in vec_val.strip("[]").split(",")]
+            elif isinstance(vec_val, list):
+                rec_dict["vector"] = [float(x) for x in vec_val]
+            else:
+                rec_dict["vector"] = list(vec_val)
+            rec_dict["id"] = str(rec_dict["id"])
+            rec = VectorRecord.from_dict(rec_dict)
+            # Normalize ts_rank to [0, 1] for consistent ranking semantics.
+            score = (float(row["lex_score"] or 0.0) / max_score) if max_score > 0 else 0.0
+            results.append(SearchResult(record=rec, score=score, rank=i + 1))
         return results
 
     async def get_by_file_hash(self, file_hash: str) -> list[VectorRecord]:

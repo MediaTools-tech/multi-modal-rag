@@ -66,6 +66,10 @@ dev = [
     "mypy>=1.13",
     "pip-audit>=2.7",
 ]
+# Optional cross-encoder re-ranker (only needed when DEEPLENS_ENABLE_RERANKER=true).
+reranker = [
+    "sentence-transformers>=2.0",
+]
 
 [project.scripts]
 deeplens = "deeplens.main:main"

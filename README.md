@@ -1,6 +1,6 @@
-# DeepLens: Privacy-First Multi-Modal Semantic File Explorer
+# DeepLens: Privacy-First Multi-Modal Semantic + Keyword File Explorer
 
-> **A modern, cross-platform desktop application that replaces word-for-word filename lookups with deep, multi-modal semantic search — running entirely offline for local privacy or accelerated in the cloud.**
+> **A modern, cross-platform desktop application that replaces word-for-word filename lookups with deep, multi-modal natural-language search — combining semantic (vector), keyword (full-text/BM25), and document-summary signals via hybrid retrieval, running entirely offline for local privacy or accelerated in the cloud.**
 
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -282,10 +282,23 @@ The hybrid path builds three ranked lists and fuses them with **Reciprocal Rank
 Fusion** (`1 / (k + rank)`):
 
 1. **Vector** — semantic ANN over all records (chunks + summaries).
-2. **Lexical** — BM25-style keyword overlap, which catches distinctive terms and
-   proper nouns (e.g. *"mansion"*, character names) that pure embedding search may blur.
+2. **Lexical (corpus-wide)** — a real full-text / BM25 search over the *entire*
+   index via the repository's `search_lexical` (Postgres `tsvector` + GIN in cloud
+   mode; LanceDB FTS, with an in-Python BM25 fallback, in local mode). This catches
+   distinctive terms and proper nouns (e.g. *"mansion"*, character names) and —
+   crucially — **covers every document, not just the vector top-k**.
 3. **Summary** — vector ranking restricted to file-level summary records, giving
    documents a second chance to surface for description-style queries.
+
+### Optional cross-encoder re-ranker (CPU-friendly by design)
+
+Fusion already re-ranks, but for maximum quality you can enable a **cross-encoder
+re-ranker** (`enable_reranker=true`). It is **opt-in and off by default** so CPU-only
+deployments pay zero cost. When enabled it scores **only the top `rerank_top_n`
+fused candidates** (default `15`) — with the tiny default model
+(`ms-marco-MiniLM-L-6-v2`, ~80 MB) that is <100 ms even on CPU. GPU/cloud users can
+raise `rerank_top_n` for more recall before re-ranking. Install the optional
+dependency with `pip install -e ".[reranker]"`.
 
 Results are also grouped into **`FileSearchGroup`** objects (file path, generated
 summary, best score, top supporting chunks) so the answer can point you straight at the
@@ -296,8 +309,10 @@ document.
 | Setting | Env var | Default | Purpose |
 |---------|---------|---------|---------|
 | `search_mode` | `DEEPLENS_SEARCH_MODE` | `hybrid` | `chunk` / `summary` / `hybrid`. |
-| `hybrid_lexical_weight` | `DEEPLENS_HYBRID_LEXICAL_WEIGHT` | `0.3` | Weight of the lexical signal in fusion. |
 | `hybrid_rrf_k` | `DEEPLENS_HYBRID_RRF_K` | `60` | RRF constant (higher = ranks matter less). |
+| `enable_reranker` | `DEEPLENS_ENABLE_RERANKER` | `false` | Apply a cross-encoder re-ranker to fused candidates. |
+| `reranker_model` | `DEEPLENS_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model id. |
+| `rerank_top_n` | `DEEPLENS_RERANK_TOP_N` | `15` | Fused candidates scored by the re-ranker before returning top_k. |
 | `enable_document_summaries` | `DEEPLENS_ENABLE_DOCUMENT_SUMMARIES` | `true` | Generate + index per-file summary records. |
 | `summary_max_chars` | `DEEPLENS_SUMMARY_MAX_CHARS` | `4000` | Max source text fed to the summarizer. |
 

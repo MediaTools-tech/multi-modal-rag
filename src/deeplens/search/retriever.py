@@ -16,7 +16,7 @@ async def retrieve(state: dict) -> dict:
     Honors ``state["search_mode"]`` (defaults to ``settings.search_mode``):
       - ``"chunk"``   : passage-level ANN only (legacy behaviour).
       - ``"summary"`` : document-level summary matching (find the file).
-      - ``"hybrid"``  : fused summary + chunk + lexical retrieval (recommended).
+      - ``"hybrid"``  : fused summary + chunk + corpus-wide lexical retrieval (recommended).
     """
     rewritten_query = state.get("rewritten_query", "")
     embedder = state["embedder"]
@@ -47,9 +47,11 @@ async def retrieve(state: dict) -> dict:
             results, file_groups = await summary_search(
                 repo=repo,
                 query_vector=query_vector,
+                settings=settings,
                 top_k=top_k,
                 folder_filter=folder_filter,
                 file_type_filter=file_type_filter,
+                query=rewritten_query,
             )
             return {"results": results, "file_groups": file_groups}
 
@@ -58,11 +60,10 @@ async def retrieve(state: dict) -> dict:
             repo=repo,
             query=rewritten_query,
             query_vector=query_vector,
+            settings=settings,
             top_k=top_k,
             folder_filter=folder_filter,
             file_type_filter=file_type_filter,
-            lexical_weight=settings.hybrid_lexical_weight,
-            rrf_k=settings.hybrid_rrf_k,
         )
         return {"results": results, "file_groups": file_groups}
 

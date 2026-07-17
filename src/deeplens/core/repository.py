@@ -114,6 +114,32 @@ class DocumentRepository(ABC):
         ...
 
     @abstractmethod
+    async def search_lexical(
+        self,
+        query: str,
+        top_k: int = 50,
+        folder_filter: str | None = None,
+        file_type_filter: str | None = None,
+    ) -> list[SearchResult]:
+        """Corpus-wide lexical / full-text search.
+
+        Unlike vector search (which only sees its own top-k), this ranks *every*
+        indexed document by keyword relevance, enabling keyword queries to surface
+        documents the vector search would not. Returns ranked candidates with a
+        normalized lexical relevance in ``score`` (higher = better).
+
+        Args:
+            query: The keyword query.
+            top_k: Maximum number of lexical candidates to return.
+            folder_filter: Optional directory subtree to scope the search.
+            file_type_filter: Optional file-type category filter.
+
+        Returns:
+            List of SearchResult objects ranked by lexical relevance.
+        """
+        ...
+
+    @abstractmethod
     async def get_file_chunks(self, absolute_path: str) -> list[VectorRecord]:
         """Return all chunks for a specific file, ordered by chunk_index.
 

@@ -64,13 +64,27 @@ class Settings(BaseSettings):
         default="hybrid",
         description="Retrieval strategy: 'chunk', 'summary', or 'hybrid'",
     )
-    hybrid_lexical_weight: float = Field(
-        default=0.3, ge=0.0, le=1.0,
-        description="Weight of the lexical (BM25-style) signal within hybrid fusion",
-    )
     hybrid_rrf_k: int = Field(
         default=60, ge=1, le=200,
         description="Reciprocal Rank Fusion constant (higher = ranks matter less)",
+    )
+
+    # ── Cross-encoder re-ranker ───────────────────────────────────────────
+    # Optional *late* re-ranking of the fused candidate set. Off by default so
+    # CPU-only deployments pay nothing; when enabled it scores only the top
+    # ``rerank_top_n`` fused candidates (cheap even on CPU with a tiny model).
+    # GPU/cloud users can raise ``rerank_top_n`` for more recall before reranking.
+    enable_reranker: bool = Field(
+        default=False,
+        description="Apply a cross-encoder re-ranker to the fused candidate set",
+    )
+    reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        description="Cross-encoder model id (small + CPU-friendly by default)",
+    )
+    rerank_top_n: int = Field(
+        default=15, ge=1, le=100,
+        description="Fused candidates scored by the re-ranker before returning top_k",
     )
 
     # ── Document Summaries ────────────────────────────────────────────────
