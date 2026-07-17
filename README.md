@@ -252,6 +252,17 @@ it as a dedicated `record_type="summary"` vector record that still points back t
 source `absolute_path`. The retriever can therefore match a description to a *file*,
 then attach the supporting chunks for grounding.
 
+> **Context-aware excerpt size.** The summarizer only feeds a head-biased excerpt
+> (capped by `summary_max_chars`) to the LLM — never the whole file — so it never
+> exceeds the model's input limit. At startup, `summary_max_chars` is **auto-tuned**
+> from the chat model's real context window (`configure_summary_budget` in
+> `core/chat.py`): it reads the model's context length from metadata (Ollama
+> `show` / Gemini `models.get`) and sizes the budget as
+> `context − system_overhead − summary_output_reserve`, clamped to a sane range.
+> Long-context models therefore use more of each file; if the window is unknown it
+> falls back to the configured default (4000). For true *whole-file* coverage on very
+> long documents, map-reduce summarization is a possible future enhancement.
+
 ### Why not RAPTOR-Lite / per-file K-Means clustering?
 
 Recursive clustering (RAPTOR) — summarizing K-Means clusters of a file's chunks into a
@@ -314,7 +325,7 @@ document.
 | `reranker_model` | `DEEPLENS_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model id. |
 | `rerank_top_n` | `DEEPLENS_RERANK_TOP_N` | `15` | Fused candidates scored by the re-ranker before returning top_k. |
 | `enable_document_summaries` | `DEEPLENS_ENABLE_DOCUMENT_SUMMARIES` | `true` | Generate + index per-file summary records. |
-| `summary_max_chars` | `DEEPLENS_SUMMARY_MAX_CHARS` | `4000` | Max source text fed to the summarizer. |
+| `summary_max_chars` | `DEEPLENS_SUMMARY_MAX_CHARS` | `4000` | Initial/fallback max chars fed to the summarizer. Auto-tuned at startup from the chat model's context window (`configure_summary_budget`). |
 
 > **Re-index note**: enabling summaries on an *existing* index adds new `record_type`
 > / `summary` columns (pgvector migrates automatically; LanceDB migrates best-effort at

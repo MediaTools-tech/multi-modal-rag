@@ -9,6 +9,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from deeplens.config import Settings
+
 
 @dataclass
 class ChatMessage:
@@ -73,6 +75,16 @@ class ChatEngine(ABC):
             ChatResponse with the generated content.
         """
         ...
+
+    @property
+    def context_window(self) -> int:
+        """Maximum input context size of the chat model, in tokens.
+
+        Concrete engines override this to report their real limit (queried from
+        model metadata at ``initialize()`` time). The default is a conservative
+        8k so callers can size prompts safely without metadata.
+        """
+        return 8192
 
     async def rewrite_query(self, user_query: str, history: list[ChatMessage] | None = None) -> str:
         """Rewrite a user query into optimized search terms.
@@ -139,3 +151,48 @@ class ChatEngine(ABC):
         context = f"Filename: {filename}\n\nDocument excerpt:\n{text}\n\nSummary:"
         response = await self.generate(context, system_prompt=system)
         return response.content.strip().strip('"').strip("'")
+
+
+def derive_summary_max_chars(
+    chat_engine: "ChatEngine",
+    *,
+    default_chars: int = 4000,
+    min_chars: int = 500,
+    max_chars: int = 20000,
+    chars_per_token: int = 4,
+    system_overhead: int = 300,
+    summary_output_reserve: int = 512,
+) -> int:
+    """Compute a safe character budget for summarization from the model context.
+
+    Leaves room for the system prompt and the generated summary so the excerpt
+    handed to ``summarize_document`` never exceeds the chat model's input limit.
+
+    Args:
+        chat_engine: The (initialized) chat engine; its ``context_window`` drives the budget.
+        default_chars: Fallback when the context window is unknown.
+        min_chars / max_chars: Clamp the result to a sane range.
+        chars_per_token: Approximate characters per token (English); conservative.
+        system_overhead: Tokens reserved for the system prompt + boilerplate.
+        summary_output_reserve: Tokens reserved for the model's summary output.
+
+    Returns:
+        The character budget to use for ``settings.summary_max_chars``.
+    """
+    ctx = chat_engine.context_window
+    if not ctx or ctx <= 0:
+        return default_chars
+    budget_tokens = max(0, ctx - system_overhead - summary_output_reserve)
+    chars = int(budget_tokens * chars_per_token)
+    return max(min_chars, min(chars, max_chars))
+
+
+def configure_summary_budget(settings: Settings, chat_engine: "ChatEngine") -> int:
+    """Set ``settings.summary_max_chars`` from the chat model's context window.
+
+    Call once after ``chat_engine.initialize()``. If the context window is
+    unknown, the existing default is preserved. Returns the chosen value.
+    """
+    value = derive_summary_max_chars(chat_engine)
+    settings.summary_max_chars = value
+    return value

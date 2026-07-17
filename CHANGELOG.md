@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `FileSearchGroup` results group matches by source file with the generated
     summary, best score, and top supporting chunks.
 - `DocumentSummarizer` (`ingestion/summarizer.py`) + `ChatEngine.summarize_document()`.
+- **Context-aware summary budget** — `summary_max_chars` is now auto-tuned at
+  startup from the chat model's real context window via `configure_summary_budget()`
+  (`core/chat.py`). `ChatEngine.context_window` is reported by each engine from model
+  metadata (Ollama `show`, Gemini `models.get`); the summarizer still feeds only a
+  head-biased excerpt, so it never exceeds the model's input limit.
 - `search/hybrid.py` — `hybrid_search()` / `summary_search()` fuse vector +
   **corpus-wide lexical** + summary rankings via Reciprocal Rank Fusion (RRF).
 - **Corpus-wide lexical / full-text index** (`search_lexical`):

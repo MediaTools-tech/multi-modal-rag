@@ -23,12 +23,13 @@ class OllamaChatEngine(ChatEngine):
         self.settings = settings
         self.model_name = settings.ollama_chat_model
         self._client: ollama.AsyncClient | None = None
+        self._context_window: int = 0
 
     async def initialize(self) -> None:
         """Initialize AsyncClient and verify Ollama is running."""
         logger.info("ollama_chat.initialize.start", host=self.settings.ollama_host, model=self.model_name)
         self._client = ollama.AsyncClient(host=self.settings.ollama_host)
-        
+
         try:
             # Check connection
             await self._client.list()
@@ -40,10 +41,27 @@ class OllamaChatEngine(ChatEngine):
                 "Please verify Ollama is installed and running (`ollama serve`)."
             ) from e
 
+        # Best-effort: read the model's real context length from metadata so the
+        # summarization budget can be sized to the actual model (no generation).
+        try:
+            info = await self._client.show(self.model_name)
+            details = getattr(info, "details", None)
+            ctx = getattr(details, "context_length", 0) if details else 0
+            self._context_window = int(ctx or 0)
+            logger.info("ollama_chat.context_window", model=self.model_name, context_window=self._context_window)
+        except Exception as e:
+            logger.warn("ollama_chat.context_window.failed", error=str(e))
+            self._context_window = 0
+
     async def close(self) -> None:
         """Release client reference."""
         self._client = None
         logger.info("ollama_chat.close")
+
+    @property
+    def context_window(self) -> int:
+        """Report the model's real context length (0 -> default)."""
+        return self._context_window or 8192
 
     async def generate(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         """Generate single completion."""

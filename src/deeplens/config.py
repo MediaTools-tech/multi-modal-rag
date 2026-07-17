@@ -95,8 +95,12 @@ class Settings(BaseSettings):
         default=True, description="Generate + index a per-file summary record"
     )
     summary_max_chars: int = Field(
-        default=4000, ge=500, le=20000,
-        description="Max characters of source text fed to the summarizer",
+        default=4000, ge=500,
+        description=(
+            "Max characters of source text fed to the summarizer. Auto-tuned at "
+            "startup from the chat model's context window (configure_summary_budget); "
+            "this value is the initial/fallback default."
+        ),
     )
 
     # ── Local Mode ────────────────────────────────────────────────────────

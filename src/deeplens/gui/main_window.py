@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 import structlog
 
 from deeplens.config import AppMode, Settings, get_settings
+from deeplens.core.chat import configure_summary_budget
 from deeplens.core.factory import BackendFactory
 from deeplens.core.models import IndexingProgress, SearchResponse
 from deeplens.ingestion.task_queue import IngestionQueue
@@ -177,7 +178,13 @@ class MainWindow(QMainWindow):
         await self.repo.initialize()
         await self.embedder.initialize()
         await self.chat.initialize()
+
+        # Size the summarization character budget to the chat model's real
+        # context window so long-context models use more of each file.
+        summary_chars = configure_summary_budget(self.settings, self.chat)
+        logger.info("main_window.summary_budget", summary_max_chars=summary_chars)
         
+
         self.pipeline = SearchPipeline(self.repo, self.embedder, self.chat, self.settings)
         self.ingest_queue = IngestionQueue(
             self.repo, self.embedder, self.settings, chat_engine=self.chat

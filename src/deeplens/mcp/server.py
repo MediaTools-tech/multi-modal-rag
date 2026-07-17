@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 import structlog
 
 from deeplens.config import get_settings
+from deeplens.core.chat import configure_summary_budget
 from deeplens.core.factory import BackendFactory
 from deeplens.search.graph import SearchPipeline
 
@@ -46,6 +47,9 @@ async def get_pipeline() -> SearchPipeline:
         await _repo.initialize()
         await _embedder.initialize()
         await _chat.initialize()
+
+        # Size the summarization budget to the chat model's context window.
+        configure_summary_budget(settings, _chat)
         
         _pipeline = SearchPipeline(_repo, _embedder, _chat, settings)
     return _pipeline

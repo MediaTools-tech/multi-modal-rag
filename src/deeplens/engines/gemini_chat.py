@@ -5,6 +5,8 @@ Runs cloud-accelerated chat models (e.g. Gemini 2.5 Flash) via the official goog
 
 from __future__ import annotations
 
+import asyncio
+
 from google import genai
 from google.genai import types
 import structlog
@@ -22,6 +24,7 @@ class GeminiChatEngine(ChatEngine):
         self.settings = settings
         self.model_name = settings.gemini_chat_model
         self._client: genai.Client | None = None
+        self._context_window: int = 0
 
     async def initialize(self) -> None:
         """Initialize Google GenAI client."""
@@ -33,10 +36,25 @@ class GeminiChatEngine(ChatEngine):
         self._client = genai.Client(api_key=api_key)
         logger.info("gemini_chat.initialize.success")
 
+        # Best-effort: read the model's real input-token limit from metadata so
+        # the summarization budget can be sized to the actual model.
+        try:
+            model_info = await asyncio.to_thread(self._client.models.get, self.model_name)
+            self._context_window = int(getattr(model_info, "input_token_limit", 0) or 0)
+            logger.info("gemini_chat.context_window", model=self.model_name, context_window=self._context_window)
+        except Exception as e:
+            logger.warn("gemini_chat.context_window.failed", error=str(e))
+            self._context_window = 0
+
     async def close(self) -> None:
         """Release client reference."""
         self._client = None
         logger.info("gemini_chat.close")
+
+    @property
+    def context_window(self) -> int:
+        """Report the model's real input-token limit (0 -> default)."""
+        return self._context_window or 8192
 
     async def generate(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         """Generate single completion."""

@@ -122,7 +122,7 @@ best final ranking.
 | Re-ranker model | `DEEPLENS_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Tiny, CPU-friendly |
 | Re-rank pool | `DEEPLENS_RERANK_TOP_N` | `15` | Candidates scored by re-ranker before top_k |
 | Summaries on | `DEEPLENS_ENABLE_DOCUMENT_SUMMARIES` | `true` | Generate per-file summary records |
-| Summary max chars | `DEEPLENS_SUMMARY_MAX_CHARS` | `4000` | Text fed to the summarizer |
+| Summary max chars | `DEEPLENS_SUMMARY_MAX_CHARS` | `4000` | Initial/fallback; **auto-tuned at startup** from the chat model's context window |
 
 ## Quick "which mode should I use?" cheat-sheet
 
