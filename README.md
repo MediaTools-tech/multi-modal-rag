@@ -160,15 +160,23 @@ Pipeline handlers are wired in `multimodal_rag/pipeline/registry.py`
 
 ## Platform support
 
+> **Currently tested on Windows x64 only.** The code is written to be cross-platform
+> (no OS branching in the core; platform-specific bits are isolated), and the Linux/macOS/WSL2
+> paths below are expected to work, but they have *not* been run end-to-end yet. Treat them as
+> unverified.
+
 | | Linux x64 | macOS | Windows x64 | WSL2 |
 |---|---|---|---|---|
-| Core + APIs + Postgres backend | yes | yes | yes | yes |
-| Audio/video (ffmpeg) | yes | yes | yes | yes |
-| LanceDB (multimodal) | AVX2 required | AVX2 required | AVX2 required | AVX2 required |
-| Desktop GUI (`PySide6-Essentials`) | yes | yes | yes | no (no display) |
+| **End-to-end tested** | no | no | **yes** | no |
+| Core + APIs + Postgres backend | expected | expected | yes | expected |
+| Audio/video (ffmpeg) | expected | expected | yes | expected |
+| LanceDB (multimodal) | AVX2 required | AVX2 required | yes (AVX2) | AVX2 required |
+| Desktop GUI (`PySide6-Essentials`) | expected | expected | yes | no (no display) |
 
 Notes and caveats:
 
+- **Testing status**: Windows x64 is the only platform exercised so far (CLIs, GUI, ingestion,
+  LanceDB, and the packaged `.exe`). Linux/macOS/WSL2 support is best-effort and unverified.
 - **AVX2** (runtime limitation, not a design input): `lancedb`/`pylance` crashes with
   `Illegal instruction` on CPUs/VMs without AVX2. Because the engine is decoupled from the
   mode, keep your multimodal content and just set `ACTIVE_DB_ENGINE=POSTGRES` on such hosts.
