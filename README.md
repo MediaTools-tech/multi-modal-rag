@@ -1,5 +1,9 @@
 # Multi-Engine Hybrid RAG
 
+<p align="center">
+  <img src="images/screenshot.jpg" alt="Multi-Engine Hybrid RAG desktop app — cited answers with source preview" width="900">
+</p>
+
 A CPU-friendly, free-tier-first RAG framework that toggles between:
 
 - **DOC_ONLY_RAG** — PostgreSQL + pgvector + native `tsvector` full-text search.
