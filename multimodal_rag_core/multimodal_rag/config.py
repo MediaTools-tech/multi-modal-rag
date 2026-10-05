@@ -375,6 +375,28 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator(
+        "SYSTEM_MODE",
+        "ACTIVE_DB_ENGINE",
+        "EMBEDDING_PROVIDER",
+        "VLM_PROVIDER",
+        "LLM_PROVIDER",
+        "RERANKER_PROVIDER",
+        "TEXT_LLM_PROVIDER",
+        "VISION_LLM_PROVIDER",
+        "MM_FRAME_STRATEGY",
+        "LANCEDB_INDEX_TYPE",
+        mode="before",
+    )
+    @classmethod
+    def _enum_values_are_case_insensitive(cls, value):
+        # All of these enums use UPPER_CASE values; accept any casing from .env
+        # (e.g. "LanceDB", "postgres") instead of failing startup with a
+        # ValidationError.
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
+
     @field_validator("MODEL_TOKEN_RATES", mode="before")
     @classmethod
     def _parse_model_rates(cls, value):
