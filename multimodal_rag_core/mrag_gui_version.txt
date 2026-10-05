@@ -1,0 +1,35 @@
+# UTF-8
+#
+# PyInstaller version resource for the GUI executable.
+# Consumed via `version="mrag_gui_version.txt"` in mrag-gui.spec.
+# Filling in real metadata (CompanyName / FileDescription / ProductVersion)
+# materially reduces antivirus false positives versus a bare, unsigned exe.
+#
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(0, 1, 0, 0),
+    prodvers=(0, 1, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'040904B0',
+          [StringStruct(u'CompanyName', u'MultiModal RAG'),
+           StringStruct(u'FileDescription', u'Multi-Engine Hybrid RAG (desktop GUI)'),
+           StringStruct(u'FileVersion', u'0.1.0.0'),
+           StringStruct(u'InternalName', u'MultiModalRAG'),
+           StringStruct(u'LegalCopyright', u'MIT License'),
+           StringStruct(u'OriginalFilename', u'MultiModalRAG.exe'),
+           StringStruct(u'ProductName', u'Multi-Engine Hybrid RAG'),
+           StringStruct(u'ProductVersion', u'0.1.0.0')])
+      ]),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)

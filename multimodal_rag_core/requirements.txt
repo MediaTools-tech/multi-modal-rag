@@ -1,0 +1,54 @@
+# Complete runtime install for the DEFAULT configuration:
+#   Google embeddings + LanceDB/Postgres backends + document parsing + audio/video.
+#
+#   pip install -r requirements.txt
+#
+# With this file installed, a clone will run end-to-end (given Python >=3.11,
+# ffmpeg on PATH, API keys in .env, and an AVX2 CPU for LanceDB).
+# Docling (document parsing + OCR) is included by default because scanned/image-only
+# PDFs otherwise extract no text. Local embeddings / reranker stay OPTIONAL (commented
+# at the bottom); the pipeline degrades gracefully without them.
+
+# Core configuration
+pydantic>=2.0
+pydantic-settings>=2.0
+python-dotenv>=1.0
+
+# Ingestion queue (watched inbox)
+watchdog>=4.0
+
+# Vector stores (both engines; only the active one is used)
+lancedb>=0.15
+pyarrow>=17.0
+psycopg[binary]>=3.2
+pgvector>=0.3
+
+# Cloud APIs (Gemini/OpenAI/Anthropic/xAI vision + embeddings, DeepSeek-compatible text)
+google-genai>=1.0
+openai>=1.0
+anthropic>=0.40
+
+# Document readers (Docling first for layout-aware parsing + OCR;
+# pypdf/docx/openpyxl are the lightweight fallback when Docling yields nothing)
+# NOTE: docling pulls torch (large download, CPU is sufficient). The first PDF
+# processed downloads OCR/layout models (~hundreds of MB, cached afterwards).
+docling>=2.0
+pypdf>=4.0
+python-docx>=1.1
+openpyxl>=3.1
+
+# Audio / video (requires the system ffmpeg binary for stream extraction)
+faster-whisper>=1.0
+# faster-whisper 1.x calls av.open(metadata_errors=..); PyAV v19 removed that
+# argument, so av must stay below 19 (its own floor is av>=11).
+av>=11,<19
+opencv-python-headless>=4.10
+numpy>=1.26
+
+# Desktop GUI (`mrag-gui`). Essentials = QtCore/QtGui/QtWidgets only (~233 MB);
+# the full `PySide6` metapackage adds QtWebEngine/3D/Multimedia (+417 MB) we don't use.
+PySide6-Essentials>=6.7
+
+# Local models (sentence-transformers): EMBEDDING_PROVIDER=LOCAL (MiniLM/bge)
+# and the cross-encoder reranker. torch comes via docling above, so this is incremental.
+sentence-transformers>=2.0

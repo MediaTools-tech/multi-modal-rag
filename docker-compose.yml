@@ -1,0 +1,92 @@
+name: multimodal-rag
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init-pgvector.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-rag_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: ./multimodal_rag_core
+      # runtime = with static ffmpeg; runtime-slim = document-only (no ffmpeg)
+      target: ${MRAG_TARGET:-runtime}
+      args:
+        # Feature sets baked into the image. docling (torch + OCR models) is on by
+        # default so scanned/image-only PDFs extract text out of the box:
+        #   MRAG_EXTRAS="all"  ->  biggest image, zero extra setup (also local
+        #                           embeddings/reranker/whisper/opencv)
+        EXTRAS: ${MRAG_EXTRAS:-lancedb,postgres,parsing,docling}
+    image: multimodal-rag:${MRAG_TAG:-latest}
+    container_name: rag-app
+    restart: unless-stopped
+    # Load the root .env so purpose-scoped keys (EMBEDDINGS_API_KEY /
+    # VLM_API_KEY / LLM_API_KEY), provider/model choices, OLLAMA_BASE_URL, etc.
+    # reach the container. The `environment` block below overrides the
+    # in-container paths and endpoints that must differ from the host.
+    # `required: false` keeps `docker compose up postgres` working with no .env.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MRAG_HOME: /data
+      # Keep all state directly under the mounted /data (avoids /data/data nesting).
+      DATA_DIR: /data
+      INBOX_DIR: /data/inbox
+      PROCESSING_DIR: /data/processing
+      PROCESSED_DIR: /data/processed
+      FAILED_DIR: /data/failed
+      STATE_DB_PATH: /data/state.db
+      VLM_CACHE_DIR: /data/vlm_cache
+      LANCEDB_DIR: /data/lancedb_lakehouse
+      # Persist HuggingFace model downloads (Docling layout/OCR models) on the
+      # /data volume so they survive container recreation (first run downloads
+      # a few hundred MB; later runs reuse them).
+      HF_HOME: /data/hf_cache
+      SYSTEM_MODE: ${SYSTEM_MODE:-MULTI_MODAL_RAG}
+      # Blank = default from SYSTEM_MODE; set POSTGRES/LANCEDB to override.
+      ACTIVE_DB_ENGINE: ${ACTIVE_DB_ENGINE:-}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-rag_db}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    volumes:
+      - ./data:/data
+    # Default command is `run` (watch inbox + process). Override for one-offs:
+    #   docker compose run --rm app add /data/inbox/foo.mp4
+    command: ["run"]
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: rag-pgadmin
+    profiles: ["admin"]
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@local.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin:/var/lib/pgadmin
+
+volumes:
+  pgdata:
+  pgadmin:

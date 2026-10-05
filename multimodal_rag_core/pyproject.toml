@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multimodal-rag"
+version = "0.1.0"
+description = "Multi-engine hybrid RAG (documents + multimodal) with free-tier friendly defaults"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "watchdog>=4.0",
+    "google-genai>=1.0",
+    "openai>=1.0",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+# Vector backends (install the one you use; both if you switch modes).
+lancedb = ["lancedb>=0.15", "pyarrow>=17.0"]
+postgres = ["psycopg[binary]>=3.2", "pgvector>=0.3"]
+# Lightweight document readers (Docling is optional below and preferred when present).
+parsing = ["pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1"]
+# Heavy local media / ML.
+docling = ["docling>=2.0"]
+local-embeddings = ["sentence-transformers>=2.0"]
+reranker = ["sentence-transformers>=2.0"]
+audio = ["faster-whisper>=1.0", "av>=11,<19"]
+video = ["opencv-python-headless>=4.10", "numpy>=1.26"]
+gui = ["PySide6-Essentials>=6.7"]
+build = ["pyinstaller>=6.0"]
+all = [
+    "lancedb>=0.15",
+    "pyarrow>=17.0",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.3",
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "docling>=2.0",
+    "sentence-transformers>=2.0",
+    "faster-whisper>=1.0",
+    "opencv-python-headless>=4.10",
+    "numpy>=1.26",
+    "PySide6-Essentials>=6.7",
+]
+
+[project.scripts]
+mrag-ingest = "multimodal_rag.ingestion.cli:main"
+mrag-query = "multimodal_rag.query:main"
+mrag-gui = "multimodal_rag.gui.app:main"
+mrag-doctor = "multimodal_rag.doctor:main"
+
+[tool.setuptools.packages.find]
+include = ["multimodal_rag*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]

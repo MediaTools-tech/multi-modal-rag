@@ -1,0 +1,96 @@
+name: Build Windows Release
+
+# Manual run, or automatically when you push a v* tag.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: multimodal_rag_core/requirements.txt
+
+      - name: Install dependencies
+        working-directory: multimodal_rag_core
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+          # mrag-gui.spec calls get_package_paths("torchvision") unguarded, so it
+          # must be present or the spec evaluation fails.
+          pip install torchvision
+
+      - name: Build (PyInstaller onedir)
+        working-directory: multimodal_rag_core
+        run: python build_gui.py
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "multimodal_rag_core\dist\MultiModalRAG\MultiModalRAG.exe")) {
+            throw "Build did not produce MultiModalRAG.exe"
+          }
+
+      - name: Zip the portable build
+        shell: pwsh
+        # tar ships on windows-latest and avoids Compress-Archive's large-archive limits.
+        run: |
+          tar -a -c -f MultiModalRAG.zip -C multimodal_rag_core\dist MultiModalRAG
+
+      - name: SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash MultiModalRAG.zip -Algorithm SHA256).Hash
+          "$hash  MultiModalRAG.zip" | Out-File -Encoding ascii MultiModalRAG.zip.sha256
+          Get-Item MultiModalRAG.zip | Select-Object Name, Length
+
+      - name: Upload build artifact (for quick download from the run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiModalRAG-windows
+          path: |
+            MultiModalRAG.zip
+            MultiModalRAG.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          name: "MultiModalRAG ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}"
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## MultiModalRAG — portable Windows build
+
+            1. Download **MultiModalRAG.zip** and unzip it (keeps the `MultiModalRAG` folder).
+            2. Run `MultiModalRAG.exe` **from inside that folder** (it needs the bundled `_internal/`).
+            3. In **Settings**, set an API key for the providers you use (e.g. Gemini), or switch
+               embeddings to local. See the README "Requirements & constraints".
+            4. First launch may offer to download **ffmpeg** (only needed for video audio).
+
+            The `.exe` is unsigned, so Windows SmartScreen / antivirus may warn.
+          files: |
+            MultiModalRAG.zip
+            MultiModalRAG.zip.sha256
