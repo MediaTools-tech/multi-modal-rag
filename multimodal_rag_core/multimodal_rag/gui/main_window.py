@@ -424,9 +424,11 @@ class MainWindow(QMainWindow):
 
     def ensure_ffmpeg(self) -> None:
         """Offer to fetch ffmpeg once at startup when it is not installed."""
-        from multimodal_rag.utils.ffmpeg_tool import ffmpeg_available
+        from multimodal_rag.utils.ffmpeg_tool import find_ffmpeg
 
-        if ffmpeg_available() or getattr(self, "_ffmpeg_worker", None) is not None:
+        resolved = find_ffmpeg()
+        logger.info("ffmpeg check: %s", resolved or "not found")
+        if resolved is not None or getattr(self, "_ffmpeg_worker", None) is not None:
             return
         answer = QMessageBox.question(
             self,

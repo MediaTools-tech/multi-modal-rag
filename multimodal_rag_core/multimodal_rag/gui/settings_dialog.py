@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -138,7 +141,7 @@ STATIC_MODEL_LISTS = {
 class SettingsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.settings = get_settings()
+        self.settings = self._fresh_settings()
         self.setWindowTitle("Settings")
         self.resize(620, 560)
         self.setMinimumSize(480, 320)
@@ -228,6 +231,28 @@ class SettingsDialog(QDialog):
         src.setStyleSheet("color: #a0a0b0; font-size: 11px;")
         src.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(src)
+
+    @staticmethod
+    def _fresh_settings():
+        """Re-read .env from disk so external edits show up in the dialog.
+
+        The running backend keeps using its startup settings until restart
+        (the dialog already says so), but what is *displayed* must match the
+        file — otherwise an edit made in Notepad looks ignored. If the file is
+        currently invalid, fall back to the startup values instead of crashing.
+        """
+        try:
+            previous = get_settings()
+        except Exception:  # noqa: BLE001
+            previous = None
+        try:
+            get_settings.cache_clear()
+            return get_settings()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Settings re-read failed, showing startup values: %s", exc)
+            if previous is not None:
+                return previous
+            raise
 
     def _enum_value(self, key: str) -> str:
         # Raw configured values, NOT role-resolved fallbacks: the dialog must
