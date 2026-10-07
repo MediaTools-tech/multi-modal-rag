@@ -71,7 +71,16 @@ cross-encoder re-ranker.
 Requirements: **Python >= 3.11** and an API key for whichever cloud providers you choose
 (embeddings can run locally instead). See **Requirements & constraints** above.
 
-### Option A — pip (full default)
+### Option A — Windows executable (PyInstaller, Windows only)
+
+No Python needed. Download `MultiModalRAG-windows.zip` from the GitHub Releases page,
+extract it, and run `MultiModalRAG.exe`. The first launch creates a `.env` next to the
+exe from the bundled template — edit it with your API keys (or use Settings in the GUI,
+which edits the same file). Everything (`data/`, `state.db`) lives next to the exe, so
+the folder is portable (~1.5 GB extracted).
+> The `.exe` is unsigned, so Windows SmartScreen / antivirus may warn on first run.
+
+### Option B — pip (full default)
 ```bash
 cd multimodal_rag_core
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -81,7 +90,7 @@ cp .env.example .env        # then edit .env
 mrag-ingest status
 ```
 
-### Option B — pip extras (fine-grained)
+### Option C — pip extras (fine-grained)
 ```bash
 pip install -e ".[lancedb,parsing,video,audio]"     # multimodal
 pip install -e ".[postgres,parsing]"                # doc-only
@@ -90,7 +99,7 @@ pip install -e ".[all]"                             # everything incl. Docling/t
 A bare `pip install -e .` installs only the pure-Python core (queue + API clients),
 so `run`/`worker` will report exactly which backend/extra is missing.
 
-### Option C — Docker (most portable)
+### Option D — Docker (most portable)
 ```bash
 # from the repository root
 cp multimodal_rag_core/.env.example .env         # compose reads keys from here
@@ -158,7 +167,7 @@ mrag-query -i                    # interactive REPL
 | `chunk` | passage-level chunk vectors only (pure semantic search) | no | fastest; literal passage lookup |
 
 Desktop GUI (native, Windows/Linux/macOS; not in Docker). Qt Essentials is already included
-in `requirements.txt`, so after Option A you can just run it:
+in `requirements.txt`, so after Option B you can just run it:
 ```bash
 mrag-gui                         # 3-pane window: ingest | chat | preview (+ cited LLM answer)
 # if you installed via extras instead: pip install -e ".[gui]"
