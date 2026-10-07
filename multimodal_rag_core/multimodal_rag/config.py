@@ -110,6 +110,7 @@ class SearchMode(str, Enum):
     CHUNK = "chunk"
     SUMMARY = "summary"
     HYBRID = "hybrid"
+    AUTO = "auto"
 
 
 class GuiTheme(str, Enum):
@@ -478,6 +479,29 @@ class Settings(BaseSettings):
         # ValidationError.
         if isinstance(value, str):
             return value.strip().upper()
+        return value
+
+    @field_validator("SEARCH_MODE", "INGESTION_MODE", "HARDWARE_DEVICE", mode="before")
+    @classmethod
+    def _lower_enums_are_case_insensitive(cls, value):
+        # These enums use lower_case values; accept any casing from .env
+        # (e.g. "HYBRID", "Hybrid") instead of failing startup with a
+        # ValidationError. The GUI saves lowercase, so a round-trip stays stable.
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("GUI_THEME", mode="before")
+    @classmethod
+    def _gui_theme_is_case_insensitive(cls, value):
+        # GuiTheme uses Title-Case values ("Midnight", ...); accept any casing
+        # from a hand-edited .env and map back to the canonical spelling so
+        # the settings dialog dropdown (exact-match) stays in sync.
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            for member in GuiTheme:
+                if member.value.lower() == normalized:
+                    return member.value
         return value
 
     @field_validator("MODEL_TOKEN_RATES", mode="before")

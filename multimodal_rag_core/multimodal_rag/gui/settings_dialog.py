@@ -28,7 +28,7 @@ from multimodal_rag.config import (
 ENUM_CHOICES = {
     "GUI_THEME": ["Midnight", "Graphite", "Ocean", "Daylight"],
     "SYSTEM_MODE": ["DOC_ONLY_RAG", "MULTI_MODAL_RAG"],
-    "SEARCH_MODE": ["hybrid", "summary", "chunk"],
+    "SEARCH_MODE": ["auto", "hybrid", "summary", "chunk"],
     "ACTIVE_DB_ENGINE": ["POSTGRES", "LANCEDB"],
     "EMBEDDING_PROVIDER": ["GOOGLE", "LOCAL"],
     "LLM_PROVIDER": ["DEEPSEEK", "GEMINI", "OPENAI", "ANTHROPIC", "XAI", "OLLAMA", "LOCAL"],

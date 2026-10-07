@@ -105,10 +105,11 @@ class SearchWorker(QThread):
 
         before = self.service.tracker.snapshot()
         try:
-            results, groups = self.service.search(self.query, self.mode, self.top_k)
-            answer = ""
-            if self.with_answer and results:
-                answer = self.service.answer(self.query, results) or ""
+            # ask() unifies plain modes and AUTO (chunk-first with hybrid
+            # fallback); usage + provenance are recorded on the service.
+            results, groups, answer, _ = self.service.ask(
+                self.query, self.mode, self.top_k, self.with_answer
+            )
             usage = TokenTracker.delta(before, self.service.tracker.snapshot())
             self.service.last_request_usage = usage
             print(f"[tokens] last request: {TokenTracker.format_usage(usage)}", flush=True)

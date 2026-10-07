@@ -57,6 +57,66 @@ def run_search(
     )
 
 
+def run_auto_search(
+    settings,
+    repo,
+    embedder,
+    query: str,
+    top_k: int,
+    folder: str | None,
+    rerank: bool,
+):
+    """AUTO retrieval: chunk first, empty results fall back to hybrid.
+
+    L1 of the AUTO strategy — costs no LLM call. Returns
+    (results, groups, mode_used).
+    """
+    results, groups = run_search(
+        settings, repo, embedder, query, SearchMode.CHUNK.value, top_k, folder, False
+    )
+    if results:
+        return results, groups, SearchMode.CHUNK.value
+    logger.info("auto: chunk empty, falling back to hybrid (no answer spent)")
+    results, groups = run_search(
+        settings, repo, embedder, query, SearchMode.HYBRID.value, top_k, folder, rerank
+    )
+    return results, groups, SearchMode.HYBRID.value
+
+
+def run_auto_query(
+    settings,
+    repo,
+    embedder,
+    query: str,
+    top_k: int,
+    folder: str | None,
+    rerank: bool,
+    answer_fn=None,
+):
+    """AUTO end-to-end: L1 (empty chunk -> hybrid) plus L2 (abstaining chunk
+    answer -> one hybrid retry). answer_fn(results) -> str|None; None skips
+    answering. Returns (results, groups, answer, mode_used).
+    """
+    from multimodal_rag.utils.api_clients import is_abstention_answer
+
+    results, groups, used = run_auto_search(
+        settings, repo, embedder, query, top_k, folder, rerank
+    )
+    answer = ""
+    if answer_fn is not None and results:
+        answer = answer_fn(results) or ""
+        if used == SearchMode.CHUNK.value and answer and is_abstention_answer(answer):
+            logger.info("auto: chunk answer abstained, retrying once with hybrid")
+            results, groups = run_search(
+                settings, repo, embedder, query, SearchMode.HYBRID.value, top_k, folder, rerank
+            )
+            answer = ""
+            if results:
+                answer = answer_fn(results) or ""
+            used = SearchMode.HYBRID.value
+    return results, groups, answer, used
+
+
 def print_results(results: list[SearchResult], groups, as_json: bool) -> None:
     if as_json:
         print(
@@ -121,14 +181,24 @@ def synthesize_answer(settings, tracker, question: str, results: list[SearchResu
 
 def _handle(settings, repo, embedder, tracker, args, query: str) -> int:
     before = tracker.snapshot()
-    results, groups = run_search(
-        settings, repo, embedder, query, args.mode, args.top_k, args.folder, args.rerank
-    )
+    answer = ""
+    if args.mode == SearchMode.AUTO.value:
+        answer_fn = None
+        if args.answer:
+            answer_fn = lambda res: synthesize_answer(settings, tracker, query, res)
+        results, groups, answer, used = run_auto_query(
+            settings, repo, embedder, query, args.top_k, args.folder, args.rerank, answer_fn
+        )
+        print(f"[auto] retrieval mode used: {used}")
+    else:
+        results, groups = run_search(
+            settings, repo, embedder, query, args.mode, args.top_k, args.folder, args.rerank
+        )
+        if args.answer and not args.json:
+            answer = synthesize_answer(settings, tracker, query, results) or ""
     print_results(results, groups, args.json)
-    if args.answer and not args.json:
-        answer = synthesize_answer(settings, tracker, query, results)
-        if answer:
-            print("\nAnswer:\n" + answer)
+    if answer and not args.json:
+        print("\nAnswer:\n" + answer)
     usage = TokenTracker.delta(before, tracker.snapshot())
     print(f"\n[tokens] request: {TokenTracker.format_usage(usage)}")
     print(f"[tokens] session: {TokenTracker.format_usage(tracker.snapshot())}")
@@ -139,7 +209,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mrag-query", description="Query the RAG index")
     parser.add_argument("query", nargs="?", help="question / search text")
     parser.add_argument("-i", "--interactive", action="store_true", help="interactive REPL")
-    parser.add_argument("--mode", choices=["chunk", "summary", "hybrid"], default=None)
+    parser.add_argument(
+        "--mode", choices=["auto", "chunk", "summary", "hybrid"], default=None
+    )
     parser.add_argument("-k", "--top-k", type=int, default=None)
     parser.add_argument("--folder", default=None, help="restrict to a source_path prefix")
     parser.add_argument("--answer", action="store_true", help="synthesize an answer via the text LLM")

@@ -85,10 +85,23 @@ class ChatPanel(QWidget):
         # Display labels describe granularity (what you get back); the stored
         # userData keeps the SearchMode values the backend expects, so labels
         # can be renamed freely without breaking search.
+        self.mode_combo.addItem("auto", "auto")
         self.mode_combo.addItem("hybrid", "hybrid")
         self.mode_combo.addItem("summary", "summary")
         self.mode_combo.addItem("chunk", "chunk")
+        # Default to the .env configured mode so the chat dropdown and the
+        # Settings panel stay in sync (previously this always opened on "auto",
+        # so queries ran as auto even when SEARCH_MODE=hybrid in .env).
+        try:
+            default_mode = get_settings().SEARCH_MODE.value
+        except Exception:  # noqa: BLE001
+            default_mode = "auto"
+        idx = self.mode_combo.findData(default_mode)
+        if idx >= 0:
+            self.mode_combo.setCurrentIndex(idx)
         self.mode_combo.setToolTip(
+            "auto: try chunk first; if retrieval is empty or the answer declines, "
+            "retry once with hybrid (provenance shown with the answer).\n"
             "hybrid: chunks + summaries + keywords, fused and reranked (best recall).\n"
             "summary: one file-level match per file (which files are about this?).\n"
             "chunk: pure vector search over passages, no keywords (fast, literal)."
@@ -172,6 +185,16 @@ class ChatPanel(QWidget):
             return data
         # Fallback for any combo without userData (never the case above).
         return self.mode_combo.currentText()
+
+    def set_mode(self, mode: str) -> None:
+        """Select a mode in the dropdown (used after Settings saves .env)."""
+        if not mode:
+            return
+        idx = self.mode_combo.findData(mode)
+        if idx < 0:
+            idx = self.mode_combo.findText(mode)
+        if idx >= 0:
+            self.mode_combo.setCurrentIndex(idx)
 
     def answer_enabled(self) -> bool:
         return self.answer_check.isChecked()

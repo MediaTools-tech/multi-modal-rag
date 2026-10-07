@@ -121,7 +121,7 @@ Copy `.env.example` to `.env`. Key settings:
 | `EMBEDDING_*` | embeddings purpose: provider, model, `EMBEDDINGS_API_KEY`, dimension |
 | `VLM_*` | vision purpose: provider, model, `VLM_API_KEY` |
 | `LLM_*` | text purpose: provider, model, `LLM_API_KEY` |
-| `SEARCH_MODE` | `chunk` / `summary` / `hybrid` |
+| `SEARCH_MODE` | `auto` / `chunk` / `summary` / `hybrid` |
 | `MRAG_HOME` | app root for `.env`, `data/`, `state.db` (default `~/.multimodal_rag`, or cwd when a `.env` is present) |
 
 Providers are configured **by purpose** (embeddings / vlm / llm), each with its own provider, model
@@ -152,6 +152,7 @@ mrag-query -i                    # interactive REPL
 
 | Mode | What it searches | Reranked? | When to use |
 |---|---|---|---|
+| `auto` | chunk first; falls back to hybrid when retrieval is empty or the LLM answer abstains | chunk pass: no; hybrid fallback: yes | cheap fast path with a safety net; chat shows which mode answered |
 | `hybrid` (default) | chunk + summary vectors + keyword search, fused with RRF | yes (cross-encoder) | best recall; answers cite the fused top hits |
 | `summary` | file-level summary vectors only | no | "which files are about X?" |
 | `chunk` | passage-level chunk vectors only (pure semantic search) | no | fastest; literal passage lookup |

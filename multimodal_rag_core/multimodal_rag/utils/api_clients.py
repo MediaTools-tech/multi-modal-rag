@@ -39,6 +39,44 @@ ANSWER_PROMPT = (
     "QUESTION: {question}\n\nCONTEXT:\n{context}\n\nANSWER:"
 )
 
+#: Short-reply markers of a declined answer. Centralized here so AUTO-mode
+#: fallback (chunk -> hybrid retry) keys on one list. Temperature-0 answering
+#: keeps the phrasing stable, which is what makes string matching viable.
+#: English-only: other languages need their own entries.
+ABSTENTION_MARKERS = (
+    "i don't know",
+    "i do not know",
+    "do not know",
+    # "not contain" must stay bound to "the answer": a bare "does not contain"
+    # also fires on real answers ("does not contain chlorine").
+    "not contain the answer",
+    "no information",
+    "not enough information",
+    "insufficient information",
+    "cannot answer",
+    "can't answer",
+    "unable to answer",
+    "not mentioned",
+    "not in the context",
+    "no mention of",
+    "i don't have",
+    "i do not have",
+)
+
+#: Abstentions are a sentence or two; a long cited answer merely quoting such
+#: a phrase must not count. Guard length so the matcher stays precise.
+_ABSTENTION_MAX_CHARS = 400
+
+
+def is_abstention_answer(text: str | None) -> bool:
+    """True when a generated answer declines for lack of evidence."""
+    if not text:
+        return True
+    normalized = re.sub(r"\s+", " ", text.lower()).strip()
+    if len(normalized) > _ABSTENTION_MAX_CHARS:
+        return False
+    return any(marker in normalized for marker in ABSTENTION_MARKERS)
+
 
 def _parse_descriptions(text: str, count: int) -> list[str]:
     match = re.search(r"\[.*\]", text or "", re.DOTALL)

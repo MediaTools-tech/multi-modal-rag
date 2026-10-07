@@ -419,6 +419,13 @@ class MainWindow(QMainWindow):
             cards.append({"key": key, "result": result, "rank": index + 1})
         if answer:
             text = answer
+            # AUTO provenance: say which evidence the citations come from, so
+            # a hybrid retry is visible instead of masquerading as chunk output.
+            requested = getattr(getattr(self, "_search_worker", None), "mode", "")
+            if requested == "auto" and self.service.last_mode_used == "hybrid":
+                text = (
+                    "_Auto: chunk was inconclusive, retried with hybrid._\n\n" + text
+                )
         elif results:
             lines = [f"{r.score:.3f} — {r.record.filename}" for r in results[:5]]
             text = "Top matches:\n" + "\n".join(lines)
@@ -578,6 +585,16 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self)
         if dialog.exec() != SettingsDialog.DialogCode.Accepted:
             return
+        # Keep the chat mode dropdown in sync with the saved .env immediately,
+        # so it no longer shows a stale mode until restart. (The backend still
+        # needs a restart for the remaining settings; the chat dropdown passes
+        # its mode explicitly per query, so the new mode takes effect at once.)
+        try:
+            saved_mode = dialog._values().get("SEARCH_MODE", "")
+        except Exception:  # noqa: BLE001
+            saved_mode = ""
+        if saved_mode:
+            self.chat_panel.set_mode(saved_mode)
         choice = QMessageBox.question(
             self,
             "Restart required",
