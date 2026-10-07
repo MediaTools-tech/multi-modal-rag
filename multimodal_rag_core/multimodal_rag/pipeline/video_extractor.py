@@ -108,6 +108,8 @@ def extract_audio_track(path: Path, settings: Settings) -> Path | None:
     if ffmpeg is None:
         return None
     target = Path(tempfile.mkdtemp()) / "audio.wav"
+    from multimodal_rag.utils.subproc import hidden_kwargs
+
     proc = subprocess.run(
         [
             ffmpeg, "-y", "-i", str(path),
@@ -115,6 +117,7 @@ def extract_audio_track(path: Path, settings: Settings) -> Path | None:
         ],
         capture_output=True,
         check=False,
+        **hidden_kwargs(),
     )
     if proc.returncode != 0 or not target.exists():
         logger.warning("ffmpeg audio extraction failed for %s", path)

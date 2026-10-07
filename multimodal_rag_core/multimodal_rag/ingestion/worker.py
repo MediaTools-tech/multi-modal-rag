@@ -194,7 +194,16 @@ class IngestionWorker:
                 output = self._handler_for(record.kind)(staged, record)
             except Exception as exc:
                 logger.exception("Handler failed for %s", staged)
-                self._fail_or_retry(record, f"{type(exc).__name__}: {exc}", staged, managed)
+                message = f"{type(exc).__name__}: {exc}"
+                # HTTP-style failures are otherwise opaque ("HTTP Error 404")
+                # with no hint of WHICH host failed (Ollama? HuggingFace?
+                # ffmpeg mirror? cloud API?). urllib/clients usually carry it.
+                for attr in ("url", "filename"):
+                    seen = getattr(exc, attr, None)
+                    if isinstance(seen, str) and seen and seen not in message:
+                        message += f" (url: {seen})"
+                        break
+                self._fail_or_retry(record, message, staged, managed)
                 return
 
             if managed:

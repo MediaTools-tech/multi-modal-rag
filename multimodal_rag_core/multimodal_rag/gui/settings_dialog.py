@@ -139,6 +139,21 @@ MODEL_PROVIDER_KEY = {
     "VLM_MODEL": "VLM_PROVIDER",
 }
 
+
+class _SteadyCombo(QComboBox):
+    """QComboBox immune to wheel scrolling.
+
+    Rolling the wheel anywhere over the settings form — including over a
+    dropdown — must scroll the page, never change a value (an accidental
+    roll once silently flipped VLM_PROVIDER to LOCAL). Wheel events are
+    therefore always ignored here; values change only by clicking the
+    dropdown arrow and picking an entry (or typing, for editable combos).
+    Ignored events propagate to the scroll area so the form scrolls.
+    """
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        event.ignore()
+
 #: Fixed preset lists (no provider dependency) for the local-model fields.
 STATIC_MODEL_LISTS = {
     "LLM_LOCAL_MODEL": ["llama3.1:8b", "mistral:7b", "qwen2.5:7b"],
@@ -179,7 +194,7 @@ class SettingsDialog(QDialog):
             form.addRow(header)
             for key in keys:
                 if key in ENUM_CHOICES:
-                    combo = QComboBox()
+                    combo = _SteadyCombo()
                     items = list(ENUM_CHOICES[key])
                     current = self._enum_value(key)
                     if current not in items:
@@ -319,7 +334,7 @@ class SettingsDialog(QDialog):
             combo.blockSignals(False)
 
     def _make_model_combo(self, key: str) -> QComboBox:
-        combo = QComboBox()
+        combo = _SteadyCombo()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         combo.setToolTip("Pick a preset, or type any custom model id — the typed text is saved.")

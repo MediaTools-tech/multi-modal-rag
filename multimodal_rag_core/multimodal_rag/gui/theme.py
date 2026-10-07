@@ -132,6 +132,8 @@ QPushButton:hover {{ background-color: {p.accent_hover}; }}
 QPushButton:pressed {{ background-color: {p.accent_pressed}; }}
 QPushButton:disabled {{ background-color: {p.disabled_bg}; color: {p.disabled_text}; }}
 QHeaderView::section {{ background-color: {p.card_bg}; color: {p.text_muted}; border: none; padding: 5px; }}
+QTableWidget::item:selected {{ background-color: {p.accent}; color: {p.accent_text}; }}
+QTableWidget::item:selected:!active {{ background-color: {p.border}; color: {p.text}; }}
 QSplitter::handle {{ background-color: {p.border}; }}
 QStatusBar {{ background-color: {p.card_bg}; color: {p.text_muted}; }}
 QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px 2px 2px 0; }}

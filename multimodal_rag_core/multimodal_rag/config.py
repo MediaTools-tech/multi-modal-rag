@@ -243,12 +243,15 @@ def detect_cuda() -> bool:
 
     if shutil.which("nvidia-smi"):
         try:
+            from multimodal_rag.utils.subproc import hidden_kwargs
+
             subprocess.run(
                 ["nvidia-smi"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=5,
                 check=True,
+                **hidden_kwargs(),
             )
             return True
         except Exception:

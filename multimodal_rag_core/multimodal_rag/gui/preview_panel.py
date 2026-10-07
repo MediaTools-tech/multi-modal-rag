@@ -146,6 +146,14 @@ class PreviewPanel(QWidget):
         layout.addWidget(QLabel("Preview", self))
         self.view = QTextBrowser(self)
         self.view.setOpenExternalLinks(False)
+        # CRITICAL: openLinks must also be False. With it left at its True
+        # default, clicking a file:// link BOTH emits anchorClicked (our
+        # handler opens the file externally — correct) AND navigates the
+        # browser itself to the file URL, replacing the pane content with the
+        # raw file bytes (readable for .txt, garbage mojibake for video).
+        # False means anchor clicks only emit anchorClicked: open externally,
+        # pane untouched.
+        self.view.setOpenLinks(False)
         self.view.anchorClicked.connect(self._on_anchor)
         self.view.setStyleSheet(
             f"background-color: {self.palette.surface_bg}; border: none; border-radius: 8px;"
@@ -218,8 +226,19 @@ class PreviewPanel(QWidget):
             f"<p><b>Path:</b> {_path_link(record.source_path, self.palette.link)}</p>"
             f"{stamp}"
             f"<hr/>"
-            f"<pre style='white-space:pre-wrap'>{html.escape(record.content or '')}</pre>"
         )
+        content = record.content or ""
+        if not content.strip():
+            body += (
+                f"<p style='color:{self.palette.text_muted}'>(empty passage)</p>"
+            )
+        elif _looks_garbled(content):
+            # Same guard as show_file_record: whisper hallucinations on
+            # non-speech audio (music/silence) can index unreadable passages.
+            # Explain instead of rendering mojibake.
+            body += _garbled_hint(record.filename, self.palette.text_muted)
+        else:
+            body += f"<pre style='white-space:pre-wrap'>{html.escape(content)}</pre>"
         self.view.setHtml(body)
         if record.file_type == "video":
             # Summary records carry timestamp_start=None (file-level) and the
@@ -390,13 +409,19 @@ class PreviewPanel(QWidget):
                 argv = [vlc, "--no-one-instance", "--start-time",
                         str(int(0 if timestamp is None else timestamp)), str(path)]
                 print(f"[play] argv={argv}", flush=True)
-                subprocess.Popen(argv)
+                from multimodal_rag.utils.subproc import hidden_kwargs
+
+                subprocess.Popen(argv, **hidden_kwargs())
             elif sys.platform.startswith("win"):
                 print(f"[play] no VLC found; default player for {path}", flush=True)
                 os.startfile(str(path))  # noqa: S606
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(path)])
+                from multimodal_rag.utils.subproc import hidden_kwargs
+
+                subprocess.Popen(["open", str(path)], **hidden_kwargs())
             else:
-                subprocess.Popen(["xdg-open", str(path)])
+                from multimodal_rag.utils.subproc import hidden_kwargs
+
+                subprocess.Popen(["xdg-open", str(path)], **hidden_kwargs())
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Cannot play", f"Could not open the video:\n{exc}")

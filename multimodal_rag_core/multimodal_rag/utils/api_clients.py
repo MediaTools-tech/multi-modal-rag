@@ -78,6 +78,46 @@ def is_abstention_answer(text: str | None) -> bool:
     return any(marker in normalized for marker in ABSTENTION_MARKERS)
 
 
+def _flatten_frame_description(item: dict) -> str:
+    """Human-readable caption from one parsed keyframe object.
+
+    The VLM returns structured objects (timestamp/core_actions/on_screen_text/
+    objects/setting); indexing the raw JSON serialized every brace and quote
+    into the search text, which is what showed up as symbol soup in the
+    preview pane. Each field may be a string, a list of strings, or a list of
+    {"name", "description"} objects — all are flattened to plain sentences.
+    The frame timestamp is skipped here: callers already prefix "[Visual @ ..]".
+    """
+
+    def _text(value) -> str:
+        if isinstance(value, list):
+            bits = []
+            for entry in value:
+                if isinstance(entry, dict):
+                    bits.append(
+                        entry.get("description") or entry.get("name") or ""
+                    )
+                else:
+                    bits.append(str(entry))
+            return "; ".join(part for part in (bit.strip() for bit in bits) if part)
+        return str(value or "").strip()
+
+    sentences = []
+    action = _text(item.get("core_actions"))
+    if action:
+        sentences.append(action)
+    on_screen = _text(item.get("on_screen_text"))
+    if on_screen:
+        sentences.append(f'On-screen text: "{on_screen}"')
+    objects = _text(item.get("objects"))
+    if objects:
+        sentences.append(f"Visible: {objects}")
+    setting = _text(item.get("setting"))
+    if setting:
+        sentences.append(f"Setting: {setting}")
+    return ". ".join(sentences)
+
+
 def _parse_descriptions(text: str, count: int) -> list[str]:
     match = re.search(r"\[.*\]", text or "", re.DOTALL)
     if match:
@@ -89,7 +129,7 @@ def _parse_descriptions(text: str, count: int) -> list[str]:
             out: list[str] = []
             for item in parsed[:count]:
                 if isinstance(item, dict):
-                    out.append(json.dumps(item, ensure_ascii=False))
+                    out.append(_flatten_frame_description(item))
                 else:
                     out.append(str(item))
             out.extend([""] * (count - len(out)))
@@ -101,12 +141,17 @@ def _parse_descriptions(text: str, count: int) -> list[str]:
 class _FrameCache:
     """Disk cache of per-frame descriptions keyed by image hash."""
 
+    #: Bumped when the stored value format changes (v1 = raw JSON objects,
+    #: v2 = flattened captions) so stale entries are never served for the
+    #: same frames after an upgrade. Old entries stay orphaned on disk.
+    _VERSION = "vlm-desc-v2:"
+
     def __init__(self, directory: str, enabled: bool) -> None:
         self.dir = Path(directory) if enabled else None
 
     @staticmethod
     def key(jpeg: bytes) -> str:
-        return hashlib.sha256(jpeg).hexdigest()
+        return hashlib.sha256(_FrameCache._VERSION.encode() + jpeg).hexdigest()
 
     def get(self, key: str) -> str | None:
         if self.dir is None:
