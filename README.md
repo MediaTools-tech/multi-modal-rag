@@ -15,10 +15,10 @@ cross-encoder re-ranker.
 
 ## Requirements & constraints (read first)
 
-- **Python >= 3.11** (3.12 recommended).
-- **AVX2 CPU required for LanceDB — the default engine (`MULTI_MODAL_RAG`).** Without AVX2,
-  `pylance` aborts with `Illegal instruction` (a native crash, not a catchable Python error).
-  On such hosts set `ACTIVE_DB_ENGINE=POSTGRES` (needs Postgres) or `SYSTEM_MODE=DOC_ONLY_RAG`.
+- **Python >= 3.11** (3.12 recommended) — Python not required for Pyinstaller version executable, for all other install options(B to D) python is required.
+- **AVX2 CPU required for LanceDB — the default engine (`MULTI_MODAL_RAG`).** Generally, old CPUs lack AVX2 suppport.
+Without AVX2, `pylance` aborts with `Illegal instruction` (a native crash, not a catchable Python error).
+  On such hosts set `ACTIVE_DB_ENGINE=POSTGRES` (needs Postgres).
 - **Engine and content mode are independent.** `ACTIVE_DB_ENGINE` (storage) and `SYSTEM_MODE`
   (content policy) are orthogonal — **Postgres + pgvector can hold multimodal content too**;
   it just needs pgvector installed. LanceDB is the default because it is embedded (no server,
@@ -40,7 +40,6 @@ cross-encoder re-ranker.
 - **The desktop GUI needs a display** (Windows/macOS/X11/Wayland); use the CLIs on headless hosts.
 - **Keep `data/` on a local disk** — SQLite WAL + LanceDB dislike network / cloud-synced folders.
 - **VLC is optional**, used only for timestamped video playback from the GUI.
-
 
 ## Repository layout
 
@@ -68,8 +67,8 @@ cross-encoder re-ranker.
 
 ## Install
 
-Requirements: **Python >= 3.11** and an API key for whichever cloud providers you choose
-(embeddings can run locally instead). See **Requirements & constraints** above.
+Requirements for Options B–D: **Python >= 3.11** and an API key for whichever cloud providers you choose
+(embeddings can run locally instead). Option A (Windows `.exe`) needs no Python. See **Requirements & constraints** above.
 
 ### Option A — Windows executable (PyInstaller, Windows only)
 
@@ -81,6 +80,7 @@ the folder is portable (~1.5 GB extracted).
 > The `.exe` is unsigned, so Windows SmartScreen / antivirus may warn on first run.
 
 ### Option B — pip (full default)
+
 ```bash
 cd multimodal_rag_core
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -91,15 +91,18 @@ mrag-ingest status
 ```
 
 ### Option C — pip extras (fine-grained)
+
 ```bash
 pip install -e ".[lancedb,parsing,video,audio]"     # multimodal
 pip install -e ".[postgres,parsing]"                # doc-only
 pip install -e ".[all]"                             # everything incl. Docling/torch
 ```
+
 A bare `pip install -e .` installs only the pure-Python core (queue + API clients),
 so `run`/`worker` will report exactly which backend/extra is missing.
 
 ### Option D — Docker (most portable)
+
 ```bash
 # from the repository root
 cp multimodal_rag_core/.env.example .env         # compose reads keys from here
@@ -112,6 +115,7 @@ MRAG_TARGET=runtime-slim MRAG_EXTRAS=parsing docker compose build app
 docker compose run --rm app scan                 # enqueue ./data/inbox
 docker compose up -d app                         # watch + process
 ```
+
 The default image ships a **static ffmpeg** (single binary) and runs as a non-root user.
 Measured sizes: `runtime-slim` **328 MB** → static ffmpeg **525 MB** → apt ffmpeg **955 MB**.
 All state lives under the mounted `./data` volume (`state.db`, `inbox/`, `processed/`,
@@ -124,7 +128,7 @@ binary: `-v "$(which ffmpeg):/usr/local/bin/ffmpeg:ro"`.
 Copy `.env.example` to `.env`. Key settings:
 
 | Setting | Purpose |
-|---|---|
+| --- | --- |
 | `SYSTEM_MODE` | `DOC_ONLY_RAG` or `MULTI_MODAL_RAG` (content policy; suggests a default engine) |
 | `ACTIVE_DB_ENGINE` | storage engine; default from `SYSTEM_MODE`, override independently |
 | `EMBEDDING_*` | embeddings purpose: provider, model, `EMBEDDINGS_API_KEY`, dimension |
@@ -141,6 +145,7 @@ Relative paths resolve against `MRAG_HOME`, not the current working directory.
 ## Usage
 
 Ingestion:
+
 ```bash
 mrag-ingest run                 # watch data/inbox/ + process (automatic mode)
 mrag-ingest add <file|dir>      # explicit ingest
@@ -150,17 +155,20 @@ mrag-ingest retry all           # requeue failures
 mrag-ingest reset-stale         # requeue items stuck in "processing"
 mrag-doctor                     # print resolved provider/key/role mapping
 ```
+
 Query (retrieval + optional cited LLM answer):
+
 ```bash
 mrag-query "the story about a man who owns a mansion"
 mrag-query "mansion" --mode summary --answer
 mrag-query "revenue" --folder /data/processed --json
 mrag-query -i                    # interactive REPL
 ```
+
 ### Search modes (`SEARCH_MODE`, GUI dropdown, `mrag-query --mode`)
 
 | Mode | What it searches | Reranked? | When to use |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `auto` | chunk first; falls back to hybrid when retrieval is empty or the LLM answer abstains | chunk pass: no; hybrid fallback: yes | cheap fast path with a safety net; chat shows which mode answered |
 | `hybrid` (default) | chunk + summary vectors + keyword search, fused with RRF | yes (cross-encoder) | best recall; answers cite the fused top hits |
 | `summary` | file-level summary vectors only | no | "which files are about X?" |
@@ -168,12 +176,14 @@ mrag-query -i                    # interactive REPL
 
 Desktop GUI (native, Windows/Linux/macOS; not in Docker). Qt Essentials is already included
 in `requirements.txt`, so after Option B you can just run it:
+
 ```bash
 mrag-gui                         # 3-pane window: ingest | chat | preview (+ cited LLM answer)
 # if you installed via extras instead: pip install -e ".[gui]"
 # optional Windows .exe (build on Windows):
 pip install -e ".[gui,build]" && pyinstaller mrag-gui.spec
 ```
+
 > Automatic ingestion requires `mrag-ingest run` (or the Docker `app` service) to be running.
 > Files must be dropped in `data/inbox/`; with no loop active, use `scan`/`add`.
 
@@ -191,14 +201,14 @@ without table structure).
 
 Practical notes:
 
-* Use **`.xlsx`, not legacy `.xls`** — Docling reads the former; the latter
+- Use **`.xlsx`, not legacy `.xls`** — Docling reads the former; the latter
   always takes the flat-text fallback.
-* Tables survive as *structure*, not computation: lookup questions
+- Tables survive as *structure*, not computation: lookup questions
   ("who scored highest in physics?") work once indexed, but aggregation
   ("average per subject") stays fragile — RAG retrieves, it doesn't compute.
-* Scanned/image-only PDFs need Docling + OCR models (first run downloads a
+- Scanned/image-only PDFs need Docling + OCR models (first run downloads a
   few hundred MB); without them such PDFs extract no text.
-* `DOC_CHUNK_SIZE` / `DOC_CHUNK_OVERLAP` (words) control passage size; very
+- `DOC_CHUNK_SIZE` / `DOC_CHUNK_OVERLAP` (words) control passage size; very
   large tables still split across chunks.
 
 ## Platform support
@@ -209,7 +219,7 @@ Practical notes:
 > unverified.
 
 | | Linux x64 | macOS | Windows x64 | WSL2 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | **End-to-end tested** | no | no | **yes** | no |
 | Core + APIs + Postgres backend | expected | expected | yes | expected |
 | Audio/video (ffmpeg) | expected | expected | yes | expected |
