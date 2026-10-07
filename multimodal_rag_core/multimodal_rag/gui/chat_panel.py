@@ -82,7 +82,17 @@ class ChatPanel(QWidget):
         top = QHBoxLayout()
         top.addWidget(QLabel("Mode:", self))
         self.mode_combo = QComboBox(self)
-        self.mode_combo.addItems(["hybrid", "summary", "chunk"])
+        # Display labels describe granularity (what you get back); the stored
+        # userData keeps the SearchMode values the backend expects, so labels
+        # can be renamed freely without breaking search.
+        self.mode_combo.addItem("hybrid", "hybrid")
+        self.mode_combo.addItem("summary", "summary")
+        self.mode_combo.addItem("chunk", "chunk")
+        self.mode_combo.setToolTip(
+            "hybrid: chunks + summaries + keywords, fused and reranked (best recall).\n"
+            "summary: one file-level match per file (which files are about this?).\n"
+            "chunk: pure vector search over passages, no keywords (fast, literal)."
+        )
         top.addWidget(self.mode_combo)
         self.answer_check = QCheckBox("LLM answer", self)
         self.answer_check.setChecked(True)
@@ -157,6 +167,10 @@ class ChatPanel(QWidget):
         self.query_submitted.emit(text)
 
     def active_mode(self) -> str:
+        data = self.mode_combo.currentData()
+        if isinstance(data, str) and data:
+            return data
+        # Fallback for any combo without userData (never the case above).
         return self.mode_combo.currentText()
 
     def answer_enabled(self) -> bool:
@@ -190,7 +204,7 @@ class ChatPanel(QWidget):
         self._scroll_bottom()
 
     def add_assistant_message(
-        self, text: str, results: list | None = None, cited: set[int] | None = None
+        self, text: str, results: list | None = None, cited: set[int] | list[int] | None = None
     ) -> None:
         p = self.palette
         bubble = QFrame()
@@ -215,10 +229,26 @@ class ChatPanel(QWidget):
             # The passages the answer cites are what the user wants to see.
             # Reranking can still place a keyword-matching but unrelated hit
             # (e.g. a video frame) on top, so surface cited passages first while
-            # preserving each card's original [N] citation number.
-            items.sort(
-                key=lambda it: (it.get("rank") not in cited, it.get("rank") or 0)
-            )
+            # preserving each card's original [N] citation number. Cited cards
+            # follow the answer's mention order (first [3] then [2] -> card [3]
+            # first), uncited cards keep rank order after the divider.
+            if isinstance(cited, (list, tuple)):
+                order: dict = {}
+                for idx, rank in enumerate(cited):
+                    if rank not in order:
+                        order[rank] = idx
+                cited_set = set(cited)
+                items.sort(
+                    key=lambda it: (
+                        (0, order.get(it.get("rank"), 10**9))
+                        if it.get("rank") in cited_set
+                        else (1, it.get("rank") or 0)
+                    )
+                )
+            else:
+                items.sort(
+                    key=lambda it: (it.get("rank") not in cited, it.get("rank") or 0)
+                )
         divider_pending = bool(cited) and any(
             it.get("rank") not in cited for it in items
         )

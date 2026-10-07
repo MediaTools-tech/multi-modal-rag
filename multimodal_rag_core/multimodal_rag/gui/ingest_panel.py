@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -29,6 +29,7 @@ class IngestPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._displayed: list = []
+        self._last_sig: list = []
         self.palette = get_palette(get_settings().GUI_THEME.value)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -61,7 +62,7 @@ class IngestPanel(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.itemSelectionChanged.connect(self._on_selection)
         layout.addWidget(self.table, 1)
 
@@ -69,8 +70,9 @@ class IngestPanel(QWidget):
         self.btn_refresh.clicked.connect(self.refresh.emit)
         self.btn_remove = QPushButton("Remove selected")
         self.btn_remove.setToolTip(
-            "Remove the selected file from the list and delete its indexed records. "
-            "The source file on disk is kept."
+            "Remove the selected file(s) from the list and delete their indexed records. "
+            "Tip: Ctrl+click / Shift+click to select several rows. "
+            "The source files on disk are kept."
         )
         self.btn_remove.setEnabled(False)
         self.btn_remove.clicked.connect(self._on_remove_clicked)
@@ -83,13 +85,26 @@ class IngestPanel(QWidget):
         self.hint.setText(message)
 
     def set_records(self, records: list, stale_ids: set[int] | None = None) -> None:
-        # Preserve the selected file across the periodic refresh rebuild.
-        selected_path: str | None = None
+        stale = stale_ids or set()
+        ordered = list(reversed(records[-500:]))
+        sig = [
+            (record.id, record.path, record.status, record.error or "", record.id in stale)
+            for record in ordered
+        ]
+        if sig == self._last_sig:
+            # Nothing changed: leave the table (and the user's in-progress
+            # Ctrl+click multi-selection) completely untouched. Rebuilding here
+            # every 2s is what collapsed multi-selections down to one row.
+            self.btn_remove.setEnabled(bool(self.selected_records()))
+            return
+        self._last_sig = sig
+        # Snapshot the selection before tearing the rows down.
+        selected_paths: set[str] = set()
         for row in self.table.selectionModel().selectedRows() if self.table.selectionModel() else []:
             if 0 <= row.row() < len(self._displayed):
-                selected_path = self._displayed[row.row()].path
-                break
-        self._displayed = list(reversed(records[-500:]))
+                selected_paths.add(self._displayed[row.row()].path)
+        self._displayed = ordered
+        restore_rows: list[int] = []
         self.table.blockSignals(True)
         try:
             self.table.setRowCount(0)
@@ -99,52 +114,53 @@ class IngestPanel(QWidget):
                 name = record.path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
                 self.table.setItem(row, 0, QTableWidgetItem(name))
                 status_item = QTableWidgetItem(record.status)
-                if stale_ids and record.id in stale_ids:
+                if record.id in stale:
                     status_item.setText(f"{record.status} (not in index)")
                     status_item.setForeground(QBrush(QColor(self.palette.warn)))
                 self.table.setItem(row, 1, status_item)
                 self.table.setItem(row, 2, QTableWidgetItem(record.error or ""))
-                if selected_path is not None and record.path == selected_path:
-                    self.table.selectRow(row)
+                if record.path in selected_paths:
+                    restore_rows.append(row)
+            # Restore in ONE selection operation: per-row selectRow() calls
+            # collapse an ExtendedSelection back to a single row.
+            if restore_rows:
+                model = self.table.selectionModel()
+                tbl_model = self.table.model()
+                last_col = max(0, self.table.columnCount() - 1)
+                sel = QItemSelection()
+                for row in restore_rows:
+                    sel.select(tbl_model.index(row, 0), tbl_model.index(row, last_col))
+                model.select(sel, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
         finally:
             self.table.blockSignals(False)
-        self.btn_remove.setEnabled(self.selected_record() is not None)
+        self.btn_remove.setEnabled(bool(self.selected_records()))
 
     def _on_selection(self) -> None:
-        model = self.table.selectionModel()
-        if model is None:
-            return
-        rows = model.selectedRows()
-        if len(rows) != 1:
-            self.btn_remove.setEnabled(False)
-            return
-        index = rows[0].row()
-        if 0 <= index < len(self._displayed):
-            self.btn_remove.setEnabled(True)
-            self.file_selected.emit(self._displayed[index])
-        else:
-            self.btn_remove.setEnabled(False)
+        records = self.selected_records()
+        self.btn_remove.setEnabled(bool(records))
+        # Preview follows a single selection; a multi-select leaves the
+        # current preview untouched instead of guessing which file to show.
+        if len(records) == 1:
+            self.file_selected.emit(records[0])
 
     def _on_remove_clicked(self) -> None:
+        records = self.selected_records()
+        if records:
+            self.remove_file.emit(records)
+
+    def selected_records(self):
+        """Currently selected queue records (possibly empty)."""
         model = self.table.selectionModel()
         if model is None:
-            return
-        rows = model.selectedRows()
-        if len(rows) != 1:
-            return
-        index = rows[0].row()
-        if 0 <= index < len(self._displayed):
-            self.remove_file.emit(self._displayed[index])
+            return []
+        out = []
+        for row in model.selectedRows():
+            index = row.row()
+            if 0 <= index < len(self._displayed):
+                out.append(self._displayed[index])
+        return out
 
     def selected_record(self):
-        """Currently selected queue record, or None."""
-        model = self.table.selectionModel()
-        if model is None:
-            return None
-        rows = model.selectedRows()
-        if len(rows) != 1:
-            return None
-        index = rows[0].row()
-        if 0 <= index < len(self._displayed):
-            return self._displayed[index]
-        return None
+        """Single selected queue record, or None (kept for compatibility)."""
+        records = self.selected_records()
+        return records[0] if len(records) == 1 else None

@@ -21,6 +21,40 @@ class InitWorker(QThread):
             self.ready.emit(f"{type(exc).__name__}: {exc}")
 
 
+class WarmupWorker(QThread):
+    """Pre-load local models off the request path after backend init.
+
+    The embedding model and reranker are loaded lazily on the first query,
+    which makes that first search pay checkpoint load + tokenizer init +
+    threadpool/kernel warmup synchronously. Running one throwaway inference
+    here moves that one-time cost to the background. Non-fatal on failure.
+    """
+
+    def __init__(self, service: BackendService) -> None:
+        super().__init__()
+        self.service = service
+
+    def run(self) -> None:
+        context = self.service.context
+        embedder = getattr(context, "embedder", None) if context is not None else None
+        if embedder is not None:
+            try:
+                embedder.warmup()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warmup] embedding warmup failed: {exc}", flush=True)
+        if self.service.settings.active_reranker != "NONE":
+            from multimodal_rag.search.reranker import CrossEncoderReranker
+
+            try:
+                CrossEncoderReranker(
+                    model_name=self.service.settings.RERANKER_MODEL,
+                    device=self.service.settings.device,
+                    top_n=self.service.settings.RERANKER_TOP_N,
+                ).warmup()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warmup] reranker warmup failed: {exc}", flush=True)
+
+
 class FfmpegDownloadWorker(QThread):
     # downloaded bytes, total bytes (0 if unknown), message
     progress = Signal(int, int, str)

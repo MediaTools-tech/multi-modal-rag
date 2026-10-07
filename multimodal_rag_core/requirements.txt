@@ -49,6 +49,10 @@ numpy>=1.26
 # the full `PySide6` metapackage adds QtWebEngine/3D/Multimedia (+417 MB) we don't use.
 PySide6-Essentials>=6.7
 
-# Local models (sentence-transformers): EMBEDDING_PROVIDER=LOCAL (MiniLM/bge)
-# and the cross-encoder reranker. torch comes via docling above, so this is incremental.
-sentence-transformers>=2.0
+# Local models (sentence-transformers): EMBEDDING_PROVIDER=LOCAL (MiniLM/bge,
+# EmbeddingGemma 2) and the cross-encoder reranker. torch comes via docling
+# above, so this is incremental. transformers rides along with
+# sentence-transformers but must stay current for launch-day architectures
+# (e.g. EmbeddingGemma 2's embedding_gemma2) — upgrade it on load failures.
+sentence-transformers>=6.1.0
+transformers>=4.56

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QStyle, QTextBrowser, QVBoxLayout, QWidget
 
 from multimodal_rag.config import get_settings
@@ -16,7 +17,105 @@ from multimodal_rag.gui.theme import get_palette
 _TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".log", ".rst", ".xml", ".html", ".htm"}
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp", ".gif"}
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".mpg", ".mpeg"}
+_AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
+# Office docs have no cheap direct reader here (no python-docx/openpyxl import
+# in the GUI layer) — like PDFs, they preview from indexed passages.
+_OFFICE_SUFFIXES = {".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".rtf"}
 _PREVIEW_MAX_CHARS = 4000
+# Indexed passages shown for files with no direct inline preview (same text
+# search actually retrieves — no live re-extraction, so no mojibake and no
+# extra format dependencies in the GUI process).
+_INDEXED_PREVIEW_CHUNKS = 3
+_INDEXED_PREVIEW_CHARS = 1500
+
+
+def _looks_garbled(text: str) -> bool:
+    """True if the text is likely font-encoding mojibake, not real content.
+
+    Only counts characters that never occur in legitimate text in ANY language:
+    U+FFFD replacements, C0/C1 controls (outside tab/newline), and Private Use
+    Area codepoints (where custom PDF font encodings surface). Non-Latin
+    scripts pass untouched — this test cannot misfire on them.
+    """
+    if not text:
+        return True
+    # Threshold note: real extractions often carry a few damaged chars (e.g.
+    # curly quotes surfacing as U+FFFD — see the joke-book chunks, ~2% bad —
+    # and must still preview). Only heavy damage (>15%) counts as mojibake.
+    bad = 0
+    for char in text:
+        point = ord(char)
+        if char == "�":
+            bad += 3  # never legitimate
+        elif point < 32 and char not in ("\t", "\n", "\r"):
+            bad += 2
+        elif 0xE000 <= point <= 0xF8FF or 0xF0000 <= point <= 0xFFFFF:
+            bad += 1
+    return bad / len(text) > 0.15
+
+
+def _indexed_passages_html(
+    chunks: list | None, label: str, muted: str
+) -> tuple[str | None, bool]:
+    """(html, garbled) for the first indexed passages.
+
+    Garbled (font-encoding mojibake) passages are skipped; ``garbled`` is True
+    when chunks exist but none were readable — callers then explain instead of
+    showing nonsense.
+    """
+    items = list(chunks or [])[:_INDEXED_PREVIEW_CHUNKS]
+    texts = []
+    garbled = False
+    for chunk in items:
+        if isinstance(chunk, dict):
+            content = chunk.get("content", "") or ""
+        else:
+            content = getattr(chunk, "content", "") or ""
+        content = content.strip()[:_INDEXED_PREVIEW_CHARS]
+        if not content:
+            continue
+        if _looks_garbled(content):
+            garbled = True
+            continue
+        texts.append(content)
+    if not texts:
+        return None, garbled
+    joined = "<hr/>".join(
+        f"<pre style='white-space:pre-wrap'>{html.escape(text)}</pre>" for text in texts
+    )
+    return (
+        f"<p style='color:{muted}'>{label} — first {len(texts)} indexed "
+        f"passage(s), same text search retrieves.</p>" + joined,
+        False,
+    )
+
+
+def _garbled_hint(name: str, muted: str) -> str:
+    """Explanation shown instead of font-encoding mojibake."""
+    return (
+        f"<p style='color:{muted}'>{html.escape(name)} — its indexed text looks "
+        "garbled (PDF custom font encoding, or scanned pages ingested without OCR). "
+        "Search hits from this file will read the same way. To fix: install Docling "
+        "with <i>DOC_USE_OCR=true</i>, then File → Reset index and re-ingest. "
+        "The file itself is fine — click the Path link above to open it.</p>"
+    )
+
+
+def _path_link(path_str: str, link_color: str | None = None) -> str:
+    """Clickable file-path HTML: opens the file with its default app.
+
+    Empty paths render as an em-dash (no dead link). The color is applied
+    inline because QTextBrowser's default anchor blue is unreadable on the
+    dark themes — callers pass their palette's link color.
+    """
+    if not (path_str or "").strip():
+        return "—"
+    url = QUrl.fromLocalFile(path_str).toString()
+    style = f" style=\"color:{link_color};\"" if link_color else ""
+    return (
+        f"<a href=\"{html.escape(url, quote=True)}\"{style}>"
+        f"{html.escape(path_str)}</a>"
+    )
 
 
 def find_vlc() -> str | None:
@@ -47,6 +146,7 @@ class PreviewPanel(QWidget):
         layout.addWidget(QLabel("Preview", self))
         self.view = QTextBrowser(self)
         self.view.setOpenExternalLinks(False)
+        self.view.anchorClicked.connect(self._on_anchor)
         self.view.setStyleSheet(
             f"background-color: {self.palette.surface_bg}; border: none; border-radius: 8px;"
         )
@@ -75,6 +175,28 @@ class PreviewPanel(QWidget):
         self.usage_session.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.usage_session)
 
+    def _on_anchor(self, url: QUrl) -> None:
+        """Open preview-pane file links with the system default app.
+
+        QTextBrowser has setOpenExternalLinks(False), so clicks arrive here
+        instead of opening silently. Missing files (inbox items moved through
+        processing/processed folders) get a warning, not silence.
+        """
+        try:
+            path_str = url.toLocalFile() if url.isLocalFile() else url.toString()
+        except Exception:
+            path_str = ""
+        if url.isLocalFile() and path_str and not Path(path_str).exists():
+            QMessageBox.warning(
+                self,
+                "File not found",
+                "The file no longer exists at:\n"
+                f"{path_str}\n\n"
+                "(Inbox files move through processing/processed folders after indexing.)",
+            )
+            return
+        QDesktopServices.openUrl(url)
+
     def set_last_usage(self, text: str) -> None:
         self.usage_last.setText(f"Last request: {text}")
 
@@ -93,19 +215,27 @@ class PreviewPanel(QWidget):
         body = (
             f"<h3>{html.escape(record.filename)}</h3>"
             f"<p><b>Score:</b> {result.score:.3f} &nbsp; <b>Type:</b> {html.escape(record.record_type)}</p>"
-            f"<p><b>Path:</b> {html.escape(record.source_path)}</p>"
+            f"<p><b>Path:</b> {_path_link(record.source_path, self.palette.link)}</p>"
             f"{stamp}"
             f"<hr/>"
             f"<pre style='white-space:pre-wrap'>{html.escape(record.content or '')}</pre>"
         )
         self.view.setHtml(body)
-        if record.file_type == "video" and record.timestamp_start is not None:
+        if record.file_type == "video":
+            # Summary records carry timestamp_start=None (file-level) and the
+            # first keyframe/audio segment carries 0.0 (falsy but valid). Both
+            # mean "from the start" and must still arm the play button.
             self._arm_play(Path(record.source_path), record.timestamp_start)
         else:
             self._hide_play()
 
-    def show_file_record(self, record) -> None:
-        """Preview a file selected in the ingestion table (queue state + content)."""
+    def show_file_record(self, record, chunks: list | None = None) -> None:
+        """Preview a file selected in the ingestion table (queue state + content).
+
+        ``chunks`` are indexed passages for the file (fetched by the caller via
+        BackendService.preview_chunks); used for the PDF branch so the pane
+        shows exactly what search retrieves instead of a live re-extraction.
+        """
         path = Path(getattr(record, "path", "") or "")
         name = path.name or str(getattr(record, "path", ""))
         suffix = path.suffix.lower()
@@ -117,7 +247,7 @@ class PreviewPanel(QWidget):
         header = (
             f"<h3>{html.escape(name)}</h3>"
             f"<p><b>Status:</b> {status} &nbsp; <b>Kind:</b> {kind}</p>"
-            f"<p><b>Path:</b> {html.escape(str(path))}</p>"
+            f"<p><b>Path:</b> {_path_link(str(path), self.palette.link)}</p>"
         )
         if error:
             header += f"<p><b>Error:</b> {error}</p>"
@@ -135,12 +265,18 @@ class PreviewPanel(QWidget):
             return
 
         if suffix in _VIDEO_SUFFIXES:
+            passages, garbled = _indexed_passages_html(
+                chunks, "Video transcript / keyframe captions", self.palette.text_muted
+            )
             self.view.setHtml(
                 header
                 + f"<p style='color:{self.palette.text_muted}'>Video file — "
+                "use the Play button below to open it from the start, or "
                 "ask a question in chat, then click a timestamped source link to preview it here.</p>"
+                + (passages or "")
+                + (_garbled_hint(name, self.palette.text_muted) if garbled else "")
             )
-            self._hide_play()
+            self._arm_play(path, None)
             return
 
         if suffix in _IMAGE_SUFFIXES:
@@ -148,6 +284,26 @@ class PreviewPanel(QWidget):
             self.view.setHtml(
                 header + f"<img src='{html.escape(url)}' width='280' />"
             )
+            self._hide_play()
+            return
+
+        if suffix == ".pdf" or suffix in _OFFICE_SUFFIXES or suffix in _AUDIO_SUFFIXES:
+            passages, garbled = _indexed_passages_html(chunks, name, self.palette.text_muted)
+            if passages:
+                self.view.setHtml(
+                    header + passages
+                    + f"<p style='color:{self.palette.text_muted}'>Click the Path link "
+                    "above to open the full file.</p>"
+                )
+            elif garbled:
+                self.view.setHtml(header + _garbled_hint(name, self.palette.text_muted))
+            else:
+                self.view.setHtml(
+                    header
+                    + f"<p style='color:{self.palette.text_muted}'>{html.escape(name)} — no indexed "
+                    "passages yet (still queued, failed, or skipped). "
+                    "Click the Path link above to open the file.</p>"
+                )
             self._hide_play()
             return
 
@@ -166,11 +322,22 @@ class PreviewPanel(QWidget):
             self._hide_play()
             return
 
-        self.view.setHtml(
-            header
-            + f"<p style='color:{self.palette.text_muted}'>No inline preview for this file type. "
-            "Ask a question in chat, then click a source link to see its indexed passages here.</p>"
-        )
+        passages, garbled = _indexed_passages_html(chunks, name, self.palette.text_muted)
+        if passages:
+            self.view.setHtml(
+                header + passages
+                + f"<p style='color:{self.palette.text_muted}'>Click the Path link "
+                "above to open the full file.</p>"
+            )
+        elif garbled:
+            self.view.setHtml(header + _garbled_hint(name, self.palette.text_muted))
+        else:
+            self.view.setHtml(
+                header
+                + f"<p style='color:{self.palette.text_muted}'>No inline preview for this file type "
+                "and no indexed passages yet. Ask a question in chat, then click a source link "
+                "to see its indexed passages here — or open the file via the Path link above.</p>"
+            )
         self._hide_play()
 
     def clear(self) -> None:
@@ -192,7 +359,9 @@ class PreviewPanel(QWidget):
         self._play_path = path
         self._play_ts = timestamp
         has_vlc = find_vlc() is not None
-        if timestamp:
+        # NOTE: use `is not None`, not truthiness — 0.0 is a valid timestamp
+        # (first frame/segment) and must show "Play from 0s", not "Open video".
+        if timestamp is not None:
             label = f"Play from {timestamp:.0f}s"
             if not has_vlc:
                 label += " (default player, from start)"
@@ -219,7 +388,7 @@ class PreviewPanel(QWidget):
                 # --no-one-instance: a running VLC would otherwise take over the
                 # new launch and silently drop --start-time (starts from 0).
                 argv = [vlc, "--no-one-instance", "--start-time",
-                        str(int(timestamp or 0)), str(path)]
+                        str(int(0 if timestamp is None else timestamp)), str(path)]
                 print(f"[play] argv={argv}", flush=True)
                 subprocess.Popen(argv)
             elif sys.platform.startswith("win"):

@@ -34,12 +34,25 @@ class BackendService:
         self.worker: IngestionWorker | None = None
         self.watcher: InboxWatcher | None = None
         self.last_answer_error: str | None = None
+        # Why the embedder is missing (version/download hint), if known.
+        # build_context swallows engine-construction errors (lazy weights), so
+        # capture the cheap eager checks here for the GUI to display.
+        self.init_error: str | None = None
 
     def initialize(self) -> None:
         self.settings.ensure_data_dirs()
         # Share one tracker so session totals include embeddings, VLM, summaries
         # and answers (build_context would otherwise use its own throwaway one).
         self.context = build_context(self.settings, require_embedder=False, tracker=self.tracker)
+        if self.context is not None and self.context.embedder is None:
+            try:
+                from multimodal_rag.pipeline.embedding import get_embedding_engine
+
+                get_embedding_engine(self.settings, self.tracker)
+            except Exception as exc:  # noqa: BLE001
+                self.init_error = str(exc)
+            else:
+                self.init_error = None
         self.store = StateStore(self.settings.STATE_DB_PATH)
         self.store.reset_stale()
         self.queue = IngestQueue(
@@ -389,3 +402,29 @@ class BackendService:
         if self.store is not None and record_id is not None:
             removed_queue = self.store.delete(record_id) > 0
         return {"vectors": removed_vectors, "queue": removed_queue}
+
+    def preview_chunks(self, record, limit: int = 3) -> list:
+        """Indexed chunks for an ingestion-table row (PDF preview pane).
+
+        Hash first (inbox files move through processing/processed folders, so
+        the queue path often differs from the indexed source_path), then exact
+        path. Empty on backend-down / not-yet-indexed — never raises, since
+        this serves a click preview, not retrieval.
+        """
+        if self.context is None or self.context.repository is None:
+            return []
+        repository = self.context.repository
+        try:
+            sha = getattr(record, "sha256", None)
+            if sha:
+                chunks = repository.get_by_file_hash(sha)
+                if chunks:
+                    return list(chunks[:limit])
+            path = getattr(record, "path", None) or str(record)
+            if path:
+                chunks = repository.get_file_chunks(path)
+                if chunks:
+                    return list(chunks[:limit])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("preview lookup failed for %s: %s", getattr(record, "path", record), exc)
+        return []

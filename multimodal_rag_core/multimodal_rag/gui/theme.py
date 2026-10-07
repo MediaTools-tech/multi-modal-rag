@@ -106,8 +106,15 @@ def get_palette(name: str | None) -> Palette:
 def app_qss(p: Palette) -> str:
     return f"""
 QWidget {{ background-color: {p.window_bg}; color: {p.text}; font-size: 13px; }}
-QMainWindow, QMenuBar, QMenu {{ background-color: {p.window_bg}; color: {p.text}; }}
+QMainWindow, QMenuBar {{ background-color: {p.window_bg}; color: {p.text}; }}
+QMenu {{ background-color: {p.card_bg}; color: {p.text}; border: 1px solid {p.border}; }}
+QMenu::item {{ background-color: transparent; color: {p.text}; padding: 6px 24px 6px 12px; }}
 QMenu::item:selected {{ background-color: {p.accent}; color: {p.accent_text}; }}
+QMenu::item:disabled {{ color: {p.disabled_text}; }}
+QMenu::separator {{ height: 1px; background: {p.border}; margin: 4px 8px; }}
+QMenuBar::item {{ background: transparent; color: {p.text}; padding: 4px 10px; }}
+QMenuBar::item:selected {{ background-color: {p.card_bg}; color: {p.text}; }}
+QMenuBar::item:pressed {{ background-color: {p.accent}; color: {p.accent_text}; }}
 QToolTip {{ background-color: {p.card_bg}; color: {p.text}; border: 1px solid {p.border}; }}
 QLineEdit, QComboBox, QPlainTextEdit {{
     background-color: {p.input_bg}; color: {p.text}; border: 1px solid {p.input_border};

@@ -20,7 +20,7 @@ from multimodal_rag.gui.ingest_panel import IngestPanel
 from multimodal_rag.gui.preview_panel import PreviewPanel
 from multimodal_rag.gui.services import BackendService
 from multimodal_rag.gui.settings_dialog import SettingsDialog
-from multimodal_rag.gui.workers import InitWorker, SearchWorker
+from multimodal_rag.gui.workers import InitWorker, SearchWorker, WarmupWorker
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,9 @@ class MainWindow(QMainWindow):
             if "has embedding" in error and "EMBEDDING_DIMENSION" in error:
                 self._on_dimension_blocked(error)
                 return
+            if "EMBEDDING_MODEL_NOT_CACHED" in error or "EMBEDDING_MODEL_UNSUPPORTED" in error:
+                self._on_embedding_model_blocked(error)
+                return
             QMessageBox.critical(
                 self,
                 "Backend failed",
@@ -118,7 +121,20 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(2000)
+        # Pre-load local models in the background so the first query does not
+        # pay checkpoint load + kernel/threadpool warmup synchronously.
+        self._warmup_worker = WarmupWorker(self.service)
+        self._warmup_worker.start()
         if not self.service.embedder_ready:
+            init_error = getattr(self.service, "init_error", None)
+            if init_error and (
+                "EMBEDDING_MODEL_NOT_CACHED" in init_error
+                or "EMBEDDING_MODEL_UNSUPPORTED" in init_error
+            ):
+                self._on_embedding_model_blocked(init_error)
+                self._check_index_fingerprint()
+                self._refresh(reconcile=True)
+                return
             self.ingest_panel.set_warning(
                 "No embedding engine configured — indexing and search are disabled until "
                 "you set keys and restart."
@@ -139,6 +155,40 @@ class MainWindow(QMainWindow):
                 )
         self._check_index_fingerprint()
         self._refresh(reconcile=True)
+
+    def _on_embedding_model_blocked(self, error: str) -> None:
+        """Local embedding checkpoint missing: show download steps, stay open.
+
+        The model is NOT bundled (hundreds of MB) — first use downloads it
+        from HuggingFace into the HF cache. The full hint (license + login +
+        pre-download command) is also posted to chat so it stays copyable
+        after the dialog closes.
+        """
+        if "EMBEDDING_MODEL_UNSUPPORTED" in error:
+            suffix = (
+                "Upgrade transformers in the app's venv as the message describes, "
+                "then restart. You can still edit Settings without restarting."
+            )
+        else:
+            suffix = (
+                "Pick a smaller variant (Settings → EMBEDDING_MODEL → "
+                "...:text-only 270M) or a smaller MRL dimension (256/128) if disk/RAM "
+                "is tight, then restart with internet access. You can still edit "
+                "Settings without restarting."
+            )
+        QMessageBox.warning(
+            self,
+            "Embedding model not downloaded",
+            f"{error}\n\n{suffix}",
+        )
+        self.ingest_panel.set_warning(
+            "Embedding model not downloaded — see the download steps in chat, "
+            "then restart with internet access."
+        )
+        self.chat_panel.set_backend_state(
+            False, "Embedding model not downloaded — see chat for steps."
+        )
+        self.chat_panel.add_assistant_message(f"Backend blocked: {error}")
 
     def _on_dimension_blocked(self, error: str) -> None:
         """Startup blocked by vector-dimension change: offer rebuild + restart."""
@@ -386,9 +436,11 @@ class MainWindow(QMainWindow):
             text = "No matches found."
         if groups:
             text += "\n\nMatching files:\n" + "\n".join(f"- {g.filename}" for g in groups)
-        # The answer cites the context by [N]; surface which cards it used so the
-        # top-ranked (most query-relevant) card can't be mistaken for the source.
-        cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer or "")}
+        # The answer cites the context by [N]; surface cards in the same order
+        # the answer mentions them (e.g. [3] then [2] -> card [3] first), so the
+        # visual list matches the reading order. Uncited cards keep rank order
+        # after a divider. Deduplicate preserving first-mention order.
+        cited = list(dict.fromkeys(int(n) for n in re.findall(r"\[(\d+)\]", answer or "")))
         self.chat_panel.add_assistant_message(text, cards, cited)
 
     def _on_result_clicked(self, key: str) -> None:
@@ -397,28 +449,54 @@ class MainWindow(QMainWindow):
             self.preview_panel.show_result(result)
 
     def _on_file_selected(self, record: object) -> None:
-        self.preview_panel.show_file_record(record)
+        try:
+            chunks = self.service.preview_chunks(record)
+        except Exception:  # noqa: BLE001
+            chunks = []
+        self.preview_panel.show_file_record(record, chunks)
 
     def _on_remove_file(self, record: object) -> None:
-        name = getattr(record, "path", str(record))
+        records = list(record) if isinstance(record, list) else [record]
+        if not records:
+            return
+        if len(records) == 1:
+            prompt = (
+                f"Remove `{getattr(records[0], 'path', str(records[0]))}` from the list "
+                "and delete its indexed records?\n\nThe source file on disk is kept."
+            )
+        else:
+            prompt = (
+                f"Remove {len(records)} files from the list and delete their "
+                "indexed records?\n\nThe source files on disk are kept."
+            )
         answer = QMessageBox.question(
             self,
-            "Remove file",
-            f"Remove `{name}` from the list and delete its indexed records?\n\n"
-            "The source file on disk is kept.",
+            "Remove file" if len(records) == 1 else f"Remove {len(records)} files",
+            prompt,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            result = self.service.remove_file(record)
+            total_vectors = 0
+            for item in records:
+                result = self.service.remove_file(item)
+                total_vectors += result["vectors"]
             self.preview_panel.clear()
             self._refresh()
-            self.chat_panel.add_assistant_message(
-                f"Removed `{name}`: {result['vectors']} indexed record(s) deleted, "
-                "queue entry removed."
-            )
+            if len(records) == 1:
+                name = getattr(records[0], "path", str(records[0]))
+                text = (
+                    f"Removed `{name}`: {total_vectors} indexed record(s) deleted, "
+                    "queue entry removed."
+                )
+            else:
+                text = (
+                    f"Removed {len(records)} file(s): {total_vectors} indexed "
+                    "record(s) deleted, queue entries removed."
+                )
+            self.chat_panel.add_assistant_message(text)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Remove failed", str(exc))
 

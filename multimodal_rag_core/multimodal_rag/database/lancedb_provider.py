@@ -93,15 +93,58 @@ class LanceDBProvider(DocumentRepository):
             except Exception as exc:
                 logger.warning("LanceDB column migration failed: %s", exc)
 
+    def _create_vector_index(self, index_type: str, num_partitions: int) -> None:
+        """Create the ANN index, tolerating old and new lancedb APIs.
+
+        New unified API (recommended): column first + ``config`` object.
+        Legacy API: metric first (``create_index(metric, vector_column_name, ...)``),
+        so the old call ``create_index("vector", metric="cosine", ...)`` bound
+        "vector" to ``metric`` and raised
+        ``got multiple values for argument 'metric'`` on new versions.
+        """
+        try:
+            from lancedb.index import IvfFlat, IvfPq
+        except ImportError:
+            # Old lancedb: metric and column must both be keywords.
+            kwargs: dict = {
+                "metric": "cosine",
+                "vector_column_name": "vector",
+                "num_partitions": num_partitions,
+            }
+            try:
+                self._table.create_index(index_type=index_type, **kwargs)
+            except TypeError:
+                self._table.create_index(**kwargs)
+            return
+        if index_type == "IVF_PQ":
+            config = IvfPq(distance_type="cosine", num_partitions=num_partitions)
+        else:
+            config = IvfFlat(distance_type="cosine", num_partitions=num_partitions)
+        self._table.create_index("vector", config=config)
+
     def _ensure_vector_index(self) -> None:
         index_type = self.settings.LANCEDB_INDEX_TYPE.value
+        if index_type == "FLAT":
+            return  # brute-force scan by design, no index to build
         try:
-            self._table.create_index(
-                "vector",
-                metric="cosine",
-                index_type=index_type,
-                num_partitions=self.settings.LANCEDB_NUM_PARTITIONS,
+            row_count = self._table.count_rows()
+        except Exception:
+            row_count = None
+        num_partitions = self.settings.LANCEDB_NUM_PARTITIONS
+        if row_count is not None and row_count < max(1, num_partitions):
+            # IVF training needs at least one row per partition; tiny tables
+            # (e.g. 36 rows / 256 partitions) cannot train and don't need ANN
+            # anyway — brute-force scan is exact and faster. The index builds
+            # on a later reindex once the table outgrows the partition count.
+            logger.info(
+                "Skipping LanceDB %s index: %s rows < %s partitions (brute-force scan)",
+                index_type,
+                row_count,
+                num_partitions,
             )
+            return
+        try:
+            self._create_vector_index(index_type, num_partitions)
         except Exception as exc:
             if "already exists" in str(exc).lower():
                 return
@@ -109,9 +152,10 @@ class LanceDBProvider(DocumentRepository):
                 "LanceDB index %s failed (%s); retrying default index", index_type, exc
             )
             try:
-                self._table.create_index("vector", metric="cosine")
+                self._create_vector_index("IVF_FLAT", num_partitions)
             except Exception as exc2:
-                logger.warning("LanceDB default vector index failed: %s", exc2)
+                if "already exists" not in str(exc2).lower():
+                    logger.warning("LanceDB default vector index failed: %s", exc2)
 
     def _ensure_fts_index(self) -> None:
         try:

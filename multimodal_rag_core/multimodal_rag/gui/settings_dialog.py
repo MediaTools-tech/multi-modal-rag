@@ -19,7 +19,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from multimodal_rag.config import KNOWN_EMBEDDING_DIMS, get_settings
+from multimodal_rag.config import (
+    EMBEDDINGGEMMA_SPECS,
+    KNOWN_EMBEDDING_DIMS,
+    get_settings,
+)
 
 ENUM_CHOICES = {
     "GUI_THEME": ["Midnight", "Graphite", "Ocean", "Daylight"],
@@ -57,7 +61,7 @@ SECTIONS: list[tuple[str, list[str]]] = [
         "Text LLM",
         [
             "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL",
-            "LLM_LOCAL_MODEL", "LLM_INPUT_COST_PER_1M", "LLM_OUTPUT_COST_PER_1M",
+            "LLM_LOCAL_MODEL", "LLM_TEMPERATURE", "LLM_INPUT_COST_PER_1M", "LLM_OUTPUT_COST_PER_1M",
         ],
     ),
     (
@@ -82,6 +86,10 @@ SECTIONS: list[tuple[str, list[str]]] = [
         "LanceDB",
         ["LANCEDB_DIR", "LANCEDB_INDEX_TYPE", "LANCEDB_NUM_PARTITIONS"],
     ),
+    (
+        "Document Parsing",
+        ["DOC_USE_OCR", "DOC_CHUNK_SIZE", "DOC_CHUNK_OVERLAP"],
+    ),
 ]
 
 
@@ -96,6 +104,11 @@ MODEL_PRESETS: dict[str, dict[str, list[str]]] = {
             "BAAI/bge-small-en-v1.5",
             "BAAI/bge-base-en-v1.5",
             "BAAI/bge-m3",
+            # EmbeddingGemma 2: one checkpoint, :suffix picks encoders
+            # (text-only 270M / text-vision 440M / text-audio 570M / full 740M).
+            # Native 768d, MRL-truncatable to 512/256/128. Downloads once from
+            # HF on first use (gated: accept license + login); not bundled.
+            *EMBEDDINGGEMMA_SPECS,
         ],
     },
     "LLM_MODEL": {
@@ -348,6 +361,10 @@ class SettingsDialog(QDialog):
     @staticmethod
     def _reranker_preset_for_embedding(model: str) -> str | None:
         name = (model or "").lower()
+        if "gemma" in name:
+            # Cross-encoder reranker is embedding-independent (raw text pairs);
+            # MiniLM default pairs fine with any local embedder.
+            return "cross-encoder/ms-marco-MiniLM-L-6-v2"
         if "bge" in name:
             return "BAAI/bge-reranker-base"
         if "minilm" in name or "mini-lm" in name:
@@ -408,9 +425,11 @@ class SettingsDialog(QDialog):
     def _maybe_fix_dimension(self) -> None:
         """Auto-populate EMBEDDING_DIMENSION from the selected model.
 
-        Only fires when the model dictates exactly one dimension and the
-        current value is not valid for it; valid or ambiguous values and
-        unknown models are left untouched.
+        Single-dimension models snap unconditionally (MiniLM 384, bge-base 768).
+        Multi-dimension models (Gemini, EmbeddingGemma 2 MRL 128/256/512/768)
+        snap a leftover invalid value (e.g. 384 from MiniLM) to native 768;
+        an explicitly valid MRL choice (256/128) is always kept.
+        Unknown models are left untouched.
         """
         model_combo = self.widgets.get("EMBEDDING_MODEL")
         dim_widget = self.widgets.get("EMBEDDING_DIMENSION")
@@ -418,14 +437,18 @@ class SettingsDialog(QDialog):
             return
         model = str(model_combo.currentText()).strip()
         valid = KNOWN_EMBEDDING_DIMS.get(model)
-        if not valid or len(valid) != 1:
+        if not valid:
             return
         try:
             current_dim = int(str(dim_widget.text()).strip())
         except (TypeError, ValueError):
             current_dim = None
-        if current_dim not in valid:
+        if current_dim in valid:
+            return
+        if len(valid) == 1:
             dim_widget.setText(str(next(iter(valid))))
+        elif 768 in valid:
+            dim_widget.setText("768")
 
     def _values(self) -> dict[str, str]:
         out: dict[str, str] = {}

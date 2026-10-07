@@ -153,7 +153,9 @@ class GeminiClient:
         except OSError:
             pass
 
-    def _generate(self, contents: list, json_mode: bool = False) -> str:
+    def _generate(
+        self, contents: list, json_mode: bool = False, temperature: float | None = None
+    ) -> str:
         attempts = max(1, self.settings.VLM_RETRY_MAX)
         last_exc: Exception | None = None
         for attempt in range(attempts):
@@ -162,12 +164,15 @@ class GeminiClient:
             try:
                 client = self._ensure()
                 kwargs = {"model": self.model, "contents": contents}
-                if json_mode:
+                if json_mode or temperature is not None:
                     from google.genai import types
 
-                    kwargs["config"] = types.GenerateContentConfig(
-                        response_mime_type="application/json"
-                    )
+                    config_kwargs: dict = {}
+                    if json_mode:
+                        config_kwargs["response_mime_type"] = "application/json"
+                    if temperature is not None:
+                        config_kwargs["temperature"] = temperature
+                    kwargs["config"] = types.GenerateContentConfig(**config_kwargs)
                 response = client.models.generate_content(**kwargs)
                 usage = getattr(response, "usage_metadata", None)
                 prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
@@ -233,8 +238,8 @@ class GeminiClient:
             [SUMMARY_PROMPT.format(filename=filename, text=text)]
         ).strip()
 
-    def generate(self, prompt: str) -> str:
-        return self._generate([prompt]).strip()
+    def generate(self, prompt: str, temperature: float | None = None) -> str:
+        return self._generate([prompt], temperature=temperature).strip()
 
 
 class OllamaClient:
@@ -263,15 +268,15 @@ class OllamaClient:
         with urllib.request.urlopen(request, timeout=600) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def generate(self, prompt: str) -> str:
-        data = self._post(
-            "/api/chat",
-            {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            },
-        )
+    def generate(self, prompt: str, temperature: float | None = None) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }
+        if temperature is not None:
+            payload["options"] = {"temperature": temperature}
+        data = self._post("/api/chat", payload)
         self.tracker.record(
             "OLLAMA",
             int(data.get("prompt_eval_count", 0) or 0),
@@ -360,12 +365,17 @@ class DeepSeekClient:
             unrated=(status == "missing"),
         )
 
-    def generate(self, prompt: str, model: str | None = None) -> str:
+    def generate(
+        self, prompt: str, model: str | None = None, temperature: float | None = None
+    ) -> str:
         client = self._ensure()
-        response = client.chat.completions.create(
-            model=model or self.model,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        create_kwargs: dict = {
+            "model": model or self.model,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if temperature is not None:
+            create_kwargs["temperature"] = temperature
+        response = client.chat.completions.create(**create_kwargs)
         usage = getattr(response, "usage", None)
         used_model = model or self.model
         self._record(
@@ -459,12 +469,15 @@ class OpenAIClient:
             model=self.model, unrated=(status == "missing"),
         )
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, temperature: float | None = None) -> str:
         client = self._ensure()
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        create_kwargs: dict = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if temperature is not None:
+            create_kwargs["temperature"] = temperature
+        response = client.chat.completions.create(**create_kwargs)
         usage = getattr(response, "usage", None)
         self._record(
             int(getattr(usage, "prompt_tokens", 0) or 0),
@@ -565,13 +578,16 @@ class AnthropicClient:
             block.text for block in (response.content or []) if getattr(block, "type", "") == "text"
         )
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, temperature: float | None = None) -> str:
         client = self._ensure()
-        response = client.messages.create(
-            model=self.model,
-            max_tokens=self.MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        create_kwargs: dict = {
+            "model": self.model,
+            "max_tokens": self.MAX_TOKENS,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if temperature is not None:
+            create_kwargs["temperature"] = temperature
+        response = client.messages.create(**create_kwargs)
         usage = getattr(response, "usage", None)
         self._record(
             int(getattr(usage, "input_tokens", 0) or 0),
@@ -749,4 +765,29 @@ def generate_rag_answer(
     if client is None:
         return None
     prompt = ANSWER_PROMPT.format(question=question, context=format_context(results))
-    return client.generate(prompt)
+    # Factual synthesis over retrieved context: temperature comes from
+    # LLM_TEMPERATURE (default 0.0 = deterministic verdicts, same evidence →
+    # same answer). Summaries and captions keep their defaults (their generate
+    # paths pass no temperature).
+    # The two log lines below are the flip-flop diagnostic: identical
+    # prompt_sha across runs with different verdicts == generation variance;
+    # differing prompt_sha == retrieval variance. Absence of these lines means
+    # this code is not the build actually running.
+    temperature = float(getattr(settings, "LLM_TEMPERATURE", 0.0))
+    prompt_sha = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12]
+    logger.info(
+        "rag_answer q=%r n_results=%d prompt_chars=%d prompt_sha=%s temperature=%s",
+        question,
+        len(results),
+        len(prompt),
+        prompt_sha,
+        temperature,
+    )
+    answer = client.generate(prompt, temperature=temperature)
+    logger.info(
+        "rag_answer done prompt_sha=%s completion_chars=%d head=%r",
+        prompt_sha,
+        len(answer or ""),
+        (answer or "")[:200],
+    )
+    return answer

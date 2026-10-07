@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import Any
 
 from multimodal_rag.core.models import SearchResult
@@ -22,6 +23,7 @@ class CrossEncoderReranker:
         self.device = device
         self.top_n = top_n
         self._model: Any = None
+        self._load_lock = threading.Lock()
 
     def _ensure_model(self) -> Any:
         if self._model is not None:
@@ -30,19 +32,40 @@ class CrossEncoderReranker:
         if cache_key in _MODEL_CACHE:
             self._model = _MODEL_CACHE[cache_key]
             return self._model
+        with self._load_lock:
+            if self._model is not None:
+                return self._model
+            if cache_key in _MODEL_CACHE:
+                self._model = _MODEL_CACHE[cache_key]
+                return self._model
+            try:
+                from sentence_transformers import CrossEncoder
+            except Exception as exc:
+                logger.warning("Reranker unavailable (sentence-transformers missing): %s", exc)
+                return None
+            try:
+                model = CrossEncoder(self.model_name, device=self.device)
+                _MODEL_CACHE[cache_key] = model
+                self._model = model
+                return model
+            except Exception as exc:
+                logger.warning("Failed to load reranker %s: %s", self.model_name, exc)
+                return None
+
+    def warmup(self) -> None:
+        """Load the cross-encoder and run one throwaway pair inference.
+
+        Moves checkpoint load, tokenizer init and first-pass setup off the
+        first real query. Non-fatal: a failed warmup is only logged.
+        """
         try:
-            from sentence_transformers import CrossEncoder
-        except Exception as exc:
-            logger.warning("Reranker unavailable (sentence-transformers missing): %s", exc)
-            return None
-        try:
-            model = CrossEncoder(self.model_name, device=self.device)
-            _MODEL_CACHE[cache_key] = model
-            self._model = model
-            return model
-        except Exception as exc:
-            logger.warning("Failed to load reranker %s: %s", self.model_name, exc)
-            return None
+            model = self._ensure_model()
+            if model is None:
+                return
+            model.predict([("warmup", "warmup")])
+            logger.info("reranker warmup complete: %s", self.model_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reranker warmup failed: %s", exc)
 
     def rerank(
         self, query: str, candidates: list[SearchResult], top_n: int | None = None

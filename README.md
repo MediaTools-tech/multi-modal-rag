@@ -76,6 +76,7 @@ Requirements: **Python >= 3.11** and an API key for whichever cloud providers yo
 cd multimodal_rag_core
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+pip install -e . --no-deps   # registers the mrag-* commands (requirements.txt holds only third-party deps)
 cp .env.example .env        # then edit .env
 mrag-ingest status
 ```
@@ -147,11 +148,18 @@ mrag-query "mansion" --mode summary --answer
 mrag-query "revenue" --folder /data/processed --json
 mrag-query -i                    # interactive REPL
 ```
+### Search modes (`SEARCH_MODE`, GUI dropdown, `mrag-query --mode`)
+
+| Mode | What it searches | Reranked? | When to use |
+|---|---|---|---|
+| `hybrid` (default) | chunk + summary vectors + keyword search, fused with RRF | yes (cross-encoder) | best recall; answers cite the fused top hits |
+| `summary` | file-level summary vectors only | no | "which files are about X?" |
+| `chunk` | passage-level chunk vectors only (pure semantic search) | no | fastest; literal passage lookup |
+
 Desktop GUI (native, Windows/Linux/macOS; not in Docker). Qt Essentials is already included
 in `requirements.txt`, so after Option A you can just run it:
 ```bash
 mrag-gui                         # 3-pane window: ingest | chat | preview (+ cited LLM answer)
-
 # if you installed via extras instead: pip install -e ".[gui]"
 # optional Windows .exe (build on Windows):
 pip install -e ".[gui,build]" && pyinstaller mrag-gui.spec
@@ -161,6 +169,27 @@ pip install -e ".[gui,build]" && pyinstaller mrag-gui.spec
 
 Pipeline handlers are wired in `multimodal_rag/pipeline/registry.py`
 (`document`, `audio`, `video`).
+
+### Document parsing (incl. tables)
+
+Documents parse **Docling-first** when it is installed and `DOC_USE_OCR=true`
+(GUI: Settings → Document Parsing): layout-aware extraction with tables kept
+as Markdown pipe-tables, which chunk cleanly and which answer models read
+natively. Otherwise (or for formats Docling doesn't read) lightweight
+fallbacks apply (`pypdf` / `python-docx` / `openpyxl`, plain text preserved
+without table structure).
+
+Practical notes:
+
+* Use **`.xlsx`, not legacy `.xls`** — Docling reads the former; the latter
+  always takes the flat-text fallback.
+* Tables survive as *structure*, not computation: lookup questions
+  ("who scored highest in physics?") work once indexed, but aggregation
+  ("average per subject") stays fragile — RAG retrieves, it doesn't compute.
+* Scanned/image-only PDFs need Docling + OCR models (first run downloads a
+  few hundred MB); without them such PDFs extract no text.
+* `DOC_CHUNK_SIZE` / `DOC_CHUNK_OVERLAP` (words) control passage size; very
+  large tables still split across chunks.
 
 ## Platform support
 

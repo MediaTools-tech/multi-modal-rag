@@ -4,11 +4,96 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 
-from multimodal_rag.config import Settings
+from multimodal_rag.config import (
+    EMBEDDINGGEMMA_MODEL_ID,
+    EMBEDDINGGEMMA_VARIANTS,
+    Settings,
+    is_embeddinggemma_spec,
+    parse_embeddinggemma_spec,
+)
 from multimodal_rag.utils.rate_limit import RateLimiter
 from multimodal_rag.utils.token_tracker import TokenTracker
 
 logger = logging.getLogger(__name__)
+
+#: sentence-transformers version that first supports EmbeddingGemma 2.
+GEMMA2_MIN_ST_VERSION = "6.1.0"
+
+
+def _type_name(exc: BaseException) -> str:
+    return type(exc).__name__
+
+
+def _caused_by_unsupported_arch(exc: BaseException) -> bool:
+    """True when the weights fetched fine but the installed `transformers`
+    predates the checkpoint's architecture (e.g. `embedding_gemma2`).
+
+    Walks the cause chain because sentence-transformers wraps the original
+    KeyError/ValueError from transformers' CONFIG_MAPPING.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = str(current).lower()
+        if "does not recognize this architecture" in text or "embedding_gemma2" in text:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _gemma_arch_hint(model_name: str, variant: str, exc: BaseException) -> str:
+    info = EMBEDDINGGEMMA_VARIANTS.get(variant, {})
+    label = info.get("label", variant)
+    return (
+        f"EMBEDDING_MODEL_UNSUPPORTED: {model_name!r} "
+        f"(EmbeddingGemma 2 — {label}) downloaded fine, but the installed "
+        f"'transformers' library predates its architecture "
+        f"({_type_name(exc)}). This is NOT a download problem — no re-download helps.\n"
+        f"Fix (venv active):\n"
+        f"  pip install -U transformers \"sentence-transformers>={GEMMA2_MIN_ST_VERSION}\"\n"
+        f"then restart the app. If it still fails (launch-day architecture with "
+        f"no release support yet):\n"
+        f"  pip install git+https://github.com/huggingface/transformers.git\n"
+        f"Note: files that already burned all their ingest retries while the loader "
+        f"was broken stay 'failed' — requeue with `mrag-ingest retry all`, then restart."
+    )
+
+
+def _gemma_download_hint(model_name: str, variant: str) -> str:
+    info = EMBEDDINGGEMMA_VARIANTS.get(variant, {})
+    label = info.get("label", variant)
+    params = info.get("params", "")
+    return (
+        f"EMBEDDING_MODEL_NOT_CACHED: local embedding model {model_name!r} "
+        f"(EmbeddingGemma 2 — {label}, {params}) is not downloaded on this machine.\n"
+        f"The model is NOT bundled with the app / Docker image / exe (hundreds of MB) — "
+        f"it downloads once from HuggingFace on first use and is then cached.\n"
+        f"To get it:\n"
+        f"  1. Accept the license at https://huggingface.co/{EMBEDDINGGEMMA_MODEL_ID}\n"
+        f"  2. pip install -U \"sentence-transformers>={GEMMA2_MIN_ST_VERSION}\" transformers huggingface_hub\n"
+        f"  3. huggingface-cli login   (needed: gated repo)\n"
+        f"  4. Pre-download (or just restart the app with internet — it auto-downloads):\n"
+        f"     huggingface-cli download {EMBEDDINGGEMMA_MODEL_ID}\n"
+        f"Cache: $HF_HOME (Docker: /data/hf_cache, persisted on the /data volume) "
+        f"or ~/.cache/huggingface.\n"
+        f"Tip: pick a smaller variant (text-only 270M) or a 256/128 MRL dimension "
+        f"if RAM/disk is tight; queries and docs must share one dimension."
+    )
+
+
+def _generic_download_hint(model_name: str) -> str:
+    return (
+        f"EMBEDDING_MODEL_NOT_CACHED: local embedding model {model_name!r} "
+        f"could not be loaded (not cached and download failed).\n"
+        f"The model is NOT bundled with the app — it downloads once from "
+        f"HuggingFace on first use.\n"
+        f"Check the model id spelling and internet, then pre-download:\n"
+        f"  pip install -U sentence-transformers huggingface_hub\n"
+        f"  huggingface-cli download {model_name}\n"
+        f"(Gated repos additionally need: accept the license on its HF page + "
+        f"huggingface-cli login.)"
+    )
 
 
 class EmbeddingEngine(ABC):
@@ -22,6 +107,14 @@ class EmbeddingEngine(ABC):
         # Queries must use the query-side task type for asymmetric embedders
         # (e.g. Google text embeddings); documents use RETRIEVAL_DOCUMENT.
         return self.embed_texts([text], task_type="RETRIEVAL_QUERY")[0]
+
+    def warmup(self) -> None:
+        """Pre-load the model so the first real query is fast.
+
+        Default: no-op (API engines have nothing to warm). Local engines
+        override to load the checkpoint and run one throwaway inference so
+        tokenizer/kernels/threadpools are ready off the request path.
+        """
 
 
 class GoogleEmbeddingEngine(EmbeddingEngine):
@@ -111,13 +204,103 @@ class LocalEmbeddingEngine(EmbeddingEngine):
         self.batch_size = max(1, settings.EMBEDDING_BATCH_SIZE)
         self.tracker = tracker or TokenTracker()
         self._model = None
+        self._lock = threading.Lock()
+        if is_embeddinggemma_spec(self.model_name):
+            # Fail fast at backend init (before any download): Gemma 2 needs
+            # sentence-transformers>=6.1.0. The weights themselves stay lazy
+            # (first query/ingest downloads them); that failure surfaces with
+            # the EMBEDDING_MODEL_NOT_CACHED download hint.
+            try:
+                from importlib.metadata import version
+                from packaging.version import Version
+            except Exception:
+                version = None  # type: ignore[assignment]
+                Version = None  # type: ignore[assignment]
+            if version is not None and Version is not None:
+                try:
+                    installed = version("sentence-transformers")
+                    if Version(installed) < Version(GEMMA2_MIN_ST_VERSION):
+                        raise RuntimeError(
+                            f"EMBEDDING_MODEL_NOT_CACHED: {self.model_name!r} needs "
+                            f"sentence-transformers>={GEMMA2_MIN_ST_VERSION} "
+                            f"(installed {installed}). Upgrade: "
+                            f"pip install -U \"sentence-transformers>={GEMMA2_MIN_ST_VERSION}\""
+                        )
+                except Exception as exc:
+                    if "EMBEDDING_MODEL_NOT_CACHED" in str(exc):
+                        raise
+                    logger.debug("st version check skipped: %s", exc)
+
+    def _load_kwargs(self) -> dict:
+        """SentenceTransformer kwargs for the configured EMBEDDING_MODEL.
+
+        EmbeddingGemma 2 shares one checkpoint; the :suffix picks encoders
+        (same 768d vector space) and EMBEDDING_DIMENSION maps to MRL
+        truncate_dim. Legacy models (MiniLM/bge) get no extra kwargs.
+        """
+        if is_embeddinggemma_spec(self.model_name):
+            _, variant, config_kwargs = parse_embeddinggemma_spec(self.model_name)
+            kwargs: dict = {"config_kwargs": config_kwargs}
+            if self.dimension != 768:
+                # MRL truncation (128/256/512); validated by Settings.
+                kwargs["truncate_dim"] = self.dimension
+            return kwargs
+        return {}
+
+    def _base_model_id(self) -> str:
+        if is_embeddinggemma_spec(self.model_name):
+            base, _, _ = parse_embeddinggemma_spec(self.model_name)
+            return base
+        return self.model_name
 
     def _ensure(self):
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-
-            self._model = SentenceTransformer(self.model_name, device=self.settings.device)
+        if self._model is not None:
+            return self._model
+        with self._lock:
+            if self._model is not None:
+                return self._model
+            try:
+                from sentence_transformers import SentenceTransformer
+            except Exception as exc:
+                raise RuntimeError(
+                    "Local embeddings need sentence-transformers: "
+                    f"pip install -U \"sentence-transformers>={GEMMA2_MIN_ST_VERSION}\" "
+                    f"({_type_name(exc)}: {exc})"
+                ) from exc
+            load_kwargs = self._load_kwargs()
+            try:
+                self._model = SentenceTransformer(
+                    self._base_model_id(), device=self.settings.device, **load_kwargs
+                )
+            except Exception as exc:
+                if is_embeddinggemma_spec(self.model_name):
+                    _, variant, _ = parse_embeddinggemma_spec(self.model_name)
+                    if _caused_by_unsupported_arch(exc):
+                        raise RuntimeError(
+                            _gemma_arch_hint(self.model_name, variant, exc)
+                        ) from exc
+                    raise RuntimeError(
+                        f"{_gemma_download_hint(self.model_name, variant)}\n"
+                        f"Underlying error: {_type_name(exc)}: {exc}"
+                    ) from exc
+                raise RuntimeError(
+                    f"{_generic_download_hint(self.model_name)}\n"
+                    f"Underlying error: {_type_name(exc)}: {exc}"
+                ) from exc
         return self._model
+
+    def warmup(self) -> None:
+        # Run one throwaway query through the same code path the first real
+        # search will use (bge query prefix / gemma task config handled by
+        # embed_query-level settings), so checkpoint load + tokenizer init +
+        # threadpool/kernel warmup happen off the request path.
+        model = self._ensure()
+        model.encode(
+            ["warmup"],
+            batch_size=1,
+            normalize_embeddings=self.settings.EMBEDDING_NORMALIZE,
+            convert_to_numpy=True,
+        )
 
     def embed_texts(
         self, texts: list[str], *, task_type: str | None = None

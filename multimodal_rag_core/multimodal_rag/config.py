@@ -136,7 +136,84 @@ KNOWN_EMBEDDING_DIMS: dict[str, set[int]] = {
     "text-embedding-004": {256, 512, 768},
     "embed-english-v3.0": {1024},
     "embed-multilingual-v3.0": {1024},
+    # EmbeddingGemma 2 (google/embeddinggemma-2): native 768d with MRL
+    # truncation to 128/256/512. One HF checkpoint; the :suffix selects which
+    # modality encoders load (same shared vector space). Bare id = full.
+    "google/embeddinggemma-2": {128, 256, 512, 768},
+    "google/embeddinggemma-2:text-only": {128, 256, 512, 768},
+    "google/embeddinggemma-2:text-vision": {128, 256, 512, 768},
+    "google/embeddinggemma-2:text-audio": {128, 256, 512, 768},
+    "google/embeddinggemma-2:full": {128, 256, 512, 768},
 }
+
+#: Base HuggingFace id for EmbeddingGemma 2 (single checkpoint, Apache-2.0,
+#: gated: accept the license + `huggingface-cli login`). The :suffix form is
+#: this app's convention to pick encoders in the EMBEDDING_MODEL dropdown.
+EMBEDDINGGEMMA_MODEL_ID = "google/embeddinggemma-2"
+
+#: variant -> (user label, config_kwargs for SentenceTransformer, params, use)
+EMBEDDINGGEMMA_VARIANTS: dict[str, dict] = {
+    "text-only": {
+        "label": "Text & Code only",
+        "config_kwargs": {"vision_config": None, "audio_config": None},
+        "params": "270M",
+        "use": "text/code retrieval, smallest RAM (~191MB quantized on-device)",
+    },
+    "text-vision": {
+        "label": "Text + Vision (images & video)",
+        "config_kwargs": {"audio_config": None},
+        "params": "440M",
+        "use": "photo/video search (+ text/code)",
+    },
+    "text-audio": {
+        "label": "Text + Audio",
+        "config_kwargs": {"vision_config": None},
+        "params": "570M",
+        "use": "voice-memo / speech search (+ text/code)",
+    },
+    "full": {
+        "label": "Full Multimodal (all modalities)",
+        "config_kwargs": {},
+        "params": "740M",
+        "use": "everything: text, code, images, video, audio (~567MB quantized)",
+    },
+}
+
+#: Dropdown values (explicit :suffix so the saved .env is self-describing).
+EMBEDDINGGEMMA_SPECS: list[str] = [
+    "google/embeddinggemma-2:text-only",
+    "google/embeddinggemma-2:text-vision",
+    "google/embeddinggemma-2:text-audio",
+    "google/embeddinggemma-2:full",
+]
+
+
+def is_embeddinggemma_spec(model: str) -> bool:
+    """True for the bare id or any :variant suffixed form."""
+    name = (model or "").strip()
+    if name == EMBEDDINGGEMMA_MODEL_ID:
+        return True
+    return name.startswith(EMBEDDINGGEMMA_MODEL_ID + ":")
+
+
+def parse_embeddinggemma_spec(model: str) -> tuple[str, str, dict]:
+    """(hf_id, variant, config_kwargs) for an EmbeddingGemma 2 spec.
+
+    Bare ``google/embeddinggemma-2`` (copy-pasted from HF docs) means ``full``.
+    Unknown suffixes fall back to ``full`` so a typo never silently drops to
+    text-only.
+    """
+    name = (model or "").strip()
+    if name == EMBEDDINGGEMMA_MODEL_ID:
+        variant = "full"
+    elif name.startswith(EMBEDDINGGEMMA_MODEL_ID + ":"):
+        variant = name.split(":", 1)[1].strip().lower() or "full"
+        if variant not in EMBEDDINGGEMMA_VARIANTS:
+            variant = "full"
+    else:
+        raise ValueError(f"Not an EmbeddingGemma 2 spec: {model!r}")
+    info = EMBEDDINGGEMMA_VARIANTS[variant]
+    return EMBEDDINGGEMMA_MODEL_ID, variant, dict(info["config_kwargs"])
 
 
 class RoleSettings(BaseModel):
@@ -236,6 +313,12 @@ class Settings(BaseSettings):
     LLM_LOCAL_MODEL: str = "llama3.1:8b"
     LLM_INPUT_COST_PER_1M: float = 0.0
     LLM_OUTPUT_COST_PER_1M: float = 0.0
+    # Sampling temperature for synthesized RAG answers (cited QA over retrieved
+    # context). 0.0 = deterministic verdicts (same evidence, same answer);
+    # raise toward 1.0 only for more varied prose. Summaries and VLM captions
+    # keep vendor defaults. Range is capped at 1.0: portable across all five
+    # text providers (Anthropic rejects >1.0).
+    LLM_TEMPERATURE: float = 0.0
 
     # ── Deprecated provider-centric names (fallbacks; prefer the role fields) ──
     DEEPSEEK_API_KEY: str = ""
@@ -427,6 +510,16 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("LLM_TEMPERATURE")
+    @classmethod
+    def _valid_temperature(cls, value: float) -> float:
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError(
+                "LLM_TEMPERATURE must be between 0.0 (deterministic) and 1.0 "
+                "(1.0 is the highest value every text provider accepts)."
+            )
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def _blank_strings_use_defaults(cls, data):
@@ -474,6 +567,19 @@ class Settings(BaseSettings):
                 chosen,
             )
             self.EMBEDDING_DIMENSION = chosen
+            return self
+        if 768 in valid:
+            # Multi-dimension models (Gemini, EmbeddingGemma 2 MRL): a leftover
+            # dim from a previous model (e.g. 384 from MiniLM) is almost never
+            # what the user wants — snap to the native 768 instead of killing
+            # startup. An explicit 128/256/512 (MRL truncation) is kept as-is
+            # by the check above.
+            logger.warning(
+                "EMBEDDING_DIMENSION=%d invalid for EMBEDDING_MODEL=%s; using 768",
+                self.EMBEDDING_DIMENSION,
+                self.EMBEDDING_MODEL,
+            )
+            self.EMBEDDING_DIMENSION = 768
             return self
         raise ValueError(
             f"EMBEDDING_DIMENSION={self.EMBEDDING_DIMENSION} invalid for "

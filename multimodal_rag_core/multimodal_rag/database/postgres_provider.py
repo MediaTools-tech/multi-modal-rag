@@ -100,10 +100,20 @@ class PostgresProvider(DocumentRepository):
                         ) STORED;
                     """
                 )
-                cur.execute(
-                    f"CREATE INDEX IF NOT EXISTS {self.table}_embedding_idx "
-                    f"ON {self.table} USING hnsw (embedding vector_cosine_ops);"
-                )
+                try:
+                    cur.execute(
+                        f"CREATE INDEX IF NOT EXISTS {self.table}_embedding_idx "
+                        f"ON {self.table} USING hnsw (embedding vector_cosine_ops);"
+                    )
+                except Exception as exc:
+                    if "hnsw" in str(exc).lower():
+                        raise RuntimeError(
+                            "Postgres vector index needs pgvector>=0.5 (HNSW): "
+                            f"{exc}. Upgrade the pgvector extension on your server "
+                            "(or pick a managed version bundling pgvector>=0.5), "
+                            "or use ACTIVE_DB_ENGINE=LANCEDB for the embedded engine."
+                        ) from exc
+                    raise
                 cur.execute(
                     f"CREATE INDEX IF NOT EXISTS {self.table}_tsv_idx "
                     f"ON {self.table} USING gin (content_tsv);"
