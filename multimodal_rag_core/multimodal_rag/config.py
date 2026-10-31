@@ -113,6 +113,22 @@ class SearchMode(str, Enum):
     AUTO = "auto"
 
 
+class SummaryProvider(str, Enum):
+    LOCAL = "LOCAL"
+    LLM = "LLM"
+    AUTO = "AUTO"
+
+
+class SummaryAlgorithm(str, Enum):
+    SEMANTIC_LEXRANK = "SEMANTIC_LEXRANK"
+    FREQUENCY = "FREQUENCY"
+
+
+class SummarySemanticUnit(str, Enum):
+    CHUNK = "CHUNK"
+    SENTENCE = "SENTENCE"
+
+
 class GuiTheme(str, Enum):
     MIDNIGHT = "Midnight"
     GRAPHITE = "Graphite"
@@ -354,7 +370,20 @@ class Settings(BaseSettings):
     SEARCH_MODE: SearchMode = SearchMode.HYBRID
     HYBRID_RRF_K: int = 60
     ENABLE_DOCUMENT_SUMMARIES: bool = True
+    SUMMARY_PROVIDER: SummaryProvider = SummaryProvider.LOCAL
+    SUMMARY_ALGORITHM: SummaryAlgorithm = SummaryAlgorithm.SEMANTIC_LEXRANK
+    SUMMARY_SEMANTIC_UNIT: SummarySemanticUnit = SummarySemanticUnit.CHUNK
+    SUMMARY_TARGET_WORDS: int = 120
+    SUMMARY_OUTPUT_MAX_CHARS: int = 900
     SUMMARY_MAX_CHARS: int = 4000
+    SUMMARY_LOCAL_MAX_CHARS: int = 30000
+    SUMMARY_MAX_CHUNKS: int = 400
+    SUMMARY_MAX_SENTENCES: int = 400
+    SUMMARY_MMR_LAMBDA: float = 0.7
+    SUMMARY_SIMILARITY_THRESHOLD: float = 0.10
+    SUMMARY_LANGUAGE: str = "english"
+    SUMMARY_INCLUDE_IMAGES: bool = True
+    SUMMARY_FALLBACK_TO_LLM: bool = False
 
     HARDWARE_DEVICE: HardwareDevice = HardwareDevice.AUTO
 
@@ -473,6 +502,9 @@ class Settings(BaseSettings):
         "VISION_LLM_PROVIDER",
         "MM_FRAME_STRATEGY",
         "LANCEDB_INDEX_TYPE",
+        "SUMMARY_PROVIDER",
+        "SUMMARY_ALGORITHM",
+        "SUMMARY_SEMANTIC_UNIT",
         mode="before",
     )
     @classmethod
@@ -545,6 +577,48 @@ class Settings(BaseSettings):
                 "LLM_TEMPERATURE must be between 0.0 (deterministic) and 1.0 "
                 "(1.0 is the highest value every text provider accepts)."
             )
+        return value
+
+    @field_validator("SUMMARY_TARGET_WORDS")
+    @classmethod
+    def _valid_summary_target_words(cls, value: int) -> int:
+        if not 20 <= int(value) <= 1000:
+            raise ValueError("SUMMARY_TARGET_WORDS must be between 20 and 1000.")
+        return value
+
+    @field_validator("SUMMARY_OUTPUT_MAX_CHARS")
+    @classmethod
+    def _valid_summary_output_chars(cls, value: int) -> int:
+        if not 200 <= int(value) <= 10000:
+            raise ValueError("SUMMARY_OUTPUT_MAX_CHARS must be between 200 and 10000.")
+        return value
+
+    @field_validator("SUMMARY_MAX_CHARS", "SUMMARY_LOCAL_MAX_CHARS")
+    @classmethod
+    def _valid_summary_input_chars(cls, value: int) -> int:
+        if int(value) < 200:
+            raise ValueError("Summary input character limits must be at least 200.")
+        return value
+
+    @field_validator("SUMMARY_MAX_CHUNKS")
+    @classmethod
+    def _valid_summary_max_chunks(cls, value: int) -> int:
+        if not 8 <= int(value) <= 2000:
+            raise ValueError("SUMMARY_MAX_CHUNKS must be between 8 and 2000.")
+        return value
+
+    @field_validator("SUMMARY_MAX_SENTENCES")
+    @classmethod
+    def _valid_summary_max_sentences(cls, value: int) -> int:
+        if not 20 <= int(value) <= 2000:
+            raise ValueError("SUMMARY_MAX_SENTENCES must be between 20 and 2000.")
+        return value
+
+    @field_validator("SUMMARY_MMR_LAMBDA", "SUMMARY_SIMILARITY_THRESHOLD")
+    @classmethod
+    def _valid_summary_ratio(cls, value: float) -> float:
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError("Summary MMR lambda and similarity threshold must be in [0, 1].")
         return value
 
     @model_validator(mode="before")
@@ -824,6 +898,17 @@ class Settings(BaseSettings):
         if self.HARDWARE_DEVICE is HardwareDevice.CUDA and not detect_cuda():
             return "cpu"
         return "cuda" if self.has_cuda else "cpu"
+
+    @property
+    def summary_uses_local(self) -> bool:
+        return self.SUMMARY_PROVIDER in (SummaryProvider.LOCAL, SummaryProvider.AUTO)
+
+    @property
+    def summary_needs_llm(self) -> bool:
+        return (
+            self.SUMMARY_PROVIDER in (SummaryProvider.LLM, SummaryProvider.AUTO)
+            or self.SUMMARY_FALLBACK_TO_LLM
+        )
 
     @property
     def is_doc_only(self) -> bool:

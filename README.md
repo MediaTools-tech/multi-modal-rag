@@ -23,12 +23,13 @@ Without AVX2, `pylance` aborts with `Illegal instruction` (a native crash, not a
   (content policy) are orthogonal — **Postgres + pgvector can hold multimodal content too**;
   it just needs pgvector installed. LanceDB is the default because it is embedded (no server,
   no Docker). Postgres is only needed when you choose `ACTIVE_DB_ENGINE=POSTGRES`.
-- **No API key is required for the default embeddings.** Out of the box,
-  `EMBEDDING_PROVIDER=LOCAL` with `BAAI/bge-base-en-v1.5` runs on CPU (downloads once). For
-  summaries, cited answers and image/video captions, the **minimum cloud setup is one Google AI
-  Studio key** (`VLM_API_KEY` and `LLM_API_KEY`; legacy `GOOGLE_API_KEY` works as a fallback).
-  Users with capable hardware can run **everything locally** (Ollama + local embeddings) with
-  no cloud key at all.
+- **No API key is required for the default embeddings or file summaries.** Out of the box,
+  `EMBEDDING_PROVIDER=LOCAL` with `BAAI/bge-base-en-v1.5` runs on CPU (downloads once), and
+  `SUMMARY_PROVIDER=LOCAL` builds summaries with semantic LexRank over the chunk vectors that
+  ingestion already computed. For cited answers and image/video captions, the **minimum cloud
+  setup is one Google AI Studio key** (`VLM_API_KEY` and `LLM_API_KEY`; legacy
+  `GOOGLE_API_KEY` works as a fallback). Users with capable hardware can run **everything
+  locally** (Ollama + local embeddings) with no cloud key at all.
 - **Internet on first run.** Local embeddings, the re-ranker, and Docling/Whisper models are
   downloaded from the Hugging Face Hub the first time they are used.
 - **`ffmpeg` is optional** — needed only to extract the audio track from **video** files. The
@@ -134,11 +135,21 @@ Copy `.env.example` to `.env`. Key settings:
 | `EMBEDDING_*` | embeddings purpose: provider, model, `EMBEDDINGS_API_KEY`, dimension |
 | `VLM_*` | vision purpose: provider, model, `VLM_API_KEY` |
 | `LLM_*` | text purpose: provider, model, `LLM_API_KEY` |
+| `SUMMARY_*` | local semantic LexRank (default) or LLM summaries; output/input budgets |
 | `SEARCH_MODE` | `auto` / `chunk` / `summary` / `hybrid` |
 | `MRAG_HOME` | app root for `.env`, `data/`, `state.db` (default `~/.multimodal_rag`, or cwd when a `.env` is present) |
 
 Providers are configured **by purpose** (embeddings / vlm / llm), each with its own provider, model
 and key — the single source of truth. Run `mrag-doctor` to see the resolved configuration.
+
+File-level summaries are local by default (`SUMMARY_PROVIDER=LOCAL`,
+`SUMMARY_ALGORITHM=SEMANTIC_LEXRANK`, `SUMMARY_SEMANTIC_UNIT=CHUNK`). This reuses the chunk
+vectors already computed during ingestion, so it adds no LLM call and no extra embedding call;
+NumPy is used when installed, with a pure-Python frequency fallback. `SUMMARY_TARGET_WORDS` and
+`SUMMARY_OUTPUT_MAX_CHARS` are text budgets, independent of `EMBEDDING_DIMENSION`, so they behave
+the same with 384-d and 768/1024/1536/3072-d models. Set `SUMMARY_SEMANTIC_UNIT=SENTENCE` for
+sentence-level LexRank (one extra embedding pass) or `SUMMARY_PROVIDER=LLM|AUTO` to use the
+configured text LLM. All `SUMMARY_*` settings are available in the GUI Settings screen.
 
 Relative paths resolve against `MRAG_HOME`, not the current working directory.
 

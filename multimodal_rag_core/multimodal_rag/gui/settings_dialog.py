@@ -29,11 +29,19 @@ ENUM_CHOICES = {
     "GUI_THEME": ["Midnight", "Graphite", "Ocean", "Daylight"],
     "SYSTEM_MODE": ["DOC_ONLY_RAG", "MULTI_MODAL_RAG"],
     "SEARCH_MODE": ["auto", "hybrid", "summary", "chunk"],
+    "SUMMARY_PROVIDER": ["LOCAL", "LLM", "AUTO"],
+    "SUMMARY_ALGORITHM": ["SEMANTIC_LEXRANK", "FREQUENCY"],
+    "SUMMARY_SEMANTIC_UNIT": ["CHUNK", "SENTENCE"],
+    "ENABLE_DOCUMENT_SUMMARIES": ["true", "false"],
+    "SUMMARY_INCLUDE_IMAGES": ["true", "false"],
+    "SUMMARY_FALLBACK_TO_LLM": ["true", "false"],
     "ACTIVE_DB_ENGINE": ["POSTGRES", "LANCEDB"],
     "EMBEDDING_PROVIDER": ["GOOGLE", "LOCAL"],
     "LLM_PROVIDER": ["DEEPSEEK", "GEMINI", "OPENAI", "ANTHROPIC", "XAI", "OLLAMA", "LOCAL"],
     "VLM_PROVIDER": ["GEMINI", "DEEPSEEK", "OPENAI", "ANTHROPIC", "XAI", "OLLAMA", "NONE", "LOCAL"],
-    "VLM_FALLBACK_PROVIDER": ["GEMINI", "OLLAMA", "NONE", "LOCAL", "OPENAI", "ANTHROPIC", "XAI", "DEEPSEEK"],
+    "VLM_FALLBACK_PROVIDER": [
+        "GEMINI", "OLLAMA", "NONE", "LOCAL", "OPENAI", "ANTHROPIC", "XAI", "DEEPSEEK"
+    ],
     "LANCEDB_INDEX_TYPE": ["IVF_FLAT", "IVF_PQ", "FLAT"],
     "RERANKER_PROVIDER": ["LOCAL", "NONE"],
 }
@@ -73,6 +81,18 @@ SECTIONS: list[tuple[str, list[str]]] = [
             "VLM_ALLOW_CPU_FALLBACK", "VLM_BATCH_SIZE", "VLM_MAX_RPM",
             "VLM_MAX_RPD", "VLM_RETRY_MAX", "VLM_BACKOFF_BASE",
             "VLM_INPUT_COST_PER_1M", "VLM_OUTPUT_COST_PER_1M", "VLM_CACHE_DIR",
+        ],
+    ),
+    (
+        "Summaries",
+        [
+            "ENABLE_DOCUMENT_SUMMARIES", "SUMMARY_PROVIDER", "SUMMARY_ALGORITHM",
+            "SUMMARY_SEMANTIC_UNIT", "SUMMARY_TARGET_WORDS",
+            "SUMMARY_OUTPUT_MAX_CHARS", "SUMMARY_MAX_CHARS",
+            "SUMMARY_LOCAL_MAX_CHARS", "SUMMARY_MAX_CHUNKS",
+            "SUMMARY_MAX_SENTENCES", "SUMMARY_MMR_LAMBDA",
+            "SUMMARY_SIMILARITY_THRESHOLD", "SUMMARY_LANGUAGE",
+            "SUMMARY_INCLUDE_IMAGES", "SUMMARY_FALLBACK_TO_LLM",
         ],
     ),
     (
@@ -285,13 +305,15 @@ class SettingsDialog(QDialog):
     def _enum_value(self, key: str) -> str:
         # Raw configured values, NOT role-resolved fallbacks: the dialog must
         # show exactly what is in .env (blank stays blank).
+        value = getattr(self.settings, key)
+        if isinstance(value, bool):
+            return "true" if value else "false"
         if key == "VLM_PROVIDER":
             provider = self.settings.VLM_PROVIDER
             return provider.value if provider is not None else ""
         if key == "LLM_PROVIDER":
             provider = self.settings.LLM_PROVIDER
             return provider.value if provider is not None else ""
-        value = getattr(self.settings, key)
         return value.value if isinstance(value, Enum) else str(value)
 
     def _text_value(self, key: str) -> str:

@@ -31,6 +31,7 @@ class MainWindow(QMainWindow):
         self.settings = get_settings()
         self.service = BackendService(self.settings)
         self._results: dict[str, object] = {}
+        self._result_seq = 0
         self._timer: QTimer | None = None
         self._stale_ids: set[int] = set()
 
@@ -151,7 +152,8 @@ class MainWindow(QMainWindow):
             if not getattr(self, "_greeted", False):
                 self._greeted = True
                 self.chat_panel.add_assistant_message(
-                    "Ready. Ask a question about your files, or add a files/folder on the left to index one."
+                    "Ready. Ask a question about your files, or add a files/folder "
+                    "on the left to index one."
                 )
         self._check_index_fingerprint()
         self._refresh(reconcile=True)
@@ -243,7 +245,7 @@ class MainWindow(QMainWindow):
         btn_trust = box.addButton(
             "Trust current index", QMessageBox.ButtonRole.AcceptRole
         )
-        btn_later = box.addButton("Decide later", QMessageBox.ButtonRole.RejectRole)
+        box.addButton("Decide later", QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(btn_trust)
         box.exec()
         clicked = box.clickedButton()
@@ -409,10 +411,14 @@ class MainWindow(QMainWindow):
         if error:
             self.chat_panel.add_assistant_message(f"Search error: {error}")
             return
-        self._results = {}
+        # Keep every previous answer's cards resolvable. Reusing rank keys
+        # (0, 1, 2, ...) and clearing this map made clicks on older answers
+        # show the newest result, or nothing when the new answer had fewer
+        # hits. A session-unique key preserves timestamps/chunks per card.
         cards = []
         for index, result in enumerate(results):
-            key = str(index)
+            self._result_seq += 1
+            key = f"result-{self._result_seq}"
             self._results[key] = result
             # 1-based rank doubles as the [N] citation number: format_context
             # numbers results in this same pool order, so card N == citation [N].
@@ -583,24 +589,30 @@ class MainWindow(QMainWindow):
 
     def _on_settings(self) -> None:
         dialog = SettingsDialog(self)
+        before = dialog._values()
         if dialog.exec() != SettingsDialog.DialogCode.Accepted:
             return
-        # Keep the chat mode dropdown in sync with the saved .env immediately,
-        # so it no longer shows a stale mode until restart. (The backend still
-        # needs a restart for the remaining settings; the chat dropdown passes
-        # its mode explicitly per query, so the new mode takes effect at once.)
-        try:
-            saved_mode = dialog._values().get("SEARCH_MODE", "")
-        except Exception:  # noqa: BLE001
-            saved_mode = ""
+        after = dialog._values()
+        changed = {key for key in after if before.get(key) != after[key]}
+        if not changed:
+            self.statusBar().showMessage("No settings changed.", 4000)
+            return
+        # SEARCH_MODE takes effect immediately: the chat dropdown passes it
+        # explicitly on every query. Everything else is read at backend startup.
+        saved_mode = after.get("SEARCH_MODE", "")
         if saved_mode:
             self.chat_panel.set_mode(saved_mode)
+        if changed == {"SEARCH_MODE"}:
+            self.statusBar().showMessage(
+                "Search mode applied immediately; no restart needed.", 5000
+            )
+            return
         choice = QMessageBox.question(
             self,
             "Restart required",
             "Settings saved to .env.\n\n"
             "The app needs to be restarted for the new settings to take effect.\n\n"
-            "Exit app?.\n\n",
+            "Exit app?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )

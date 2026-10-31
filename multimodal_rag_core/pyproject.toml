@@ -24,6 +24,9 @@ lancedb = ["lancedb>=0.15", "pyarrow>=17.0"]
 postgres = ["psycopg[binary]>=3.2", "pgvector>=0.3"]
 # Lightweight document readers (Docling is optional below and preferred when present).
 parsing = ["pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1"]
+# Semantic LexRank summaries (CHUNK mode). Without NumPy, a pure-Python
+# frequency fallback still works.
+summarizer = ["numpy>=1.26"]
 # Heavy local media / ML.
 docling = ["docling>=2.0"]
 # EmbeddingGemma 2 (Oct 2026) needs sentence-transformers>=6.1.0 for

@@ -17,6 +17,36 @@ def _bool(ok: bool) -> str:
     return "OK" if ok else "MISSING"
 
 
+def _print_summaries(settings) -> None:
+    import importlib.util
+
+    numpy_state = "OK" if importlib.util.find_spec("numpy") else "MISSING (frequency fallback)"
+    provider = settings.SUMMARY_PROVIDER.value
+    algorithm = settings.SUMMARY_ALGORITHM.value
+    unit = settings.SUMMARY_SEMANTIC_UNIT.value
+    print("SUMMARIES   file-level summary records")
+    print(f"  enabled  : {settings.ENABLE_DOCUMENT_SUMMARIES}")
+    print(f"  provider : {provider}   algorithm={algorithm}   semantic_unit={unit}")
+    print(
+        f"  output   : target_words={settings.SUMMARY_TARGET_WORDS}"
+        f"   max_chars={settings.SUMMARY_OUTPUT_MAX_CHARS}"
+    )
+    print(
+        f"  input    : llm_max_chars={settings.SUMMARY_MAX_CHARS}"
+        f"   local_max_chars={settings.SUMMARY_LOCAL_MAX_CHARS}"
+    )
+    print(
+        f"  graph    : max_chunks={settings.SUMMARY_MAX_CHUNKS}"
+        f"   max_sentences={settings.SUMMARY_MAX_SENTENCES}"
+        f"   numpy={numpy_state}"
+    )
+    print(
+        f"  images   : {settings.SUMMARY_INCLUDE_IMAGES}"
+        f"   fallback_to_llm={settings.SUMMARY_FALLBACK_TO_LLM}"
+    )
+    print()
+
+
 def _print_fingerprint(settings) -> None:
     """Show the stored index fingerprint vs current index-time config."""
     import json
@@ -54,7 +84,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Multi-Engine Hybrid RAG - effective configuration")
     print("=" * 60)
-    print(f"SYSTEM_MODE : {settings.SYSTEM_MODE.value}  ->  engine {settings.ACTIVE_DB_ENGINE.value}")
+    engine = settings.ACTIVE_DB_ENGINE.value
+    print(f"SYSTEM_MODE : {settings.SYSTEM_MODE.value}  ->  engine {engine}")
     print(f"App root    : {settings.app_root}  (MRAG_HOME)")
     print(f"Ingest state: {settings.STATE_DB_PATH}")
     print()
@@ -62,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     roles = [
         (settings.embedding_role, "indexing + query vectors"),
         (settings.vlm_role, "video keyframe captions"),
-        (settings.llm_role, "per-file summaries + synthesized answers"),
+        (settings.llm_role, "synthesized answers + optional LLM summaries"),
     ]
     for role, description in roles:
         needs = _needs_key(role.provider)
@@ -78,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  effective: {_bool(ok)}")
         print()
 
+    _print_summaries(settings)
     print("RERANKER    cross-encoder over fused candidates")
     print(f"  provider : {settings.RERANKER_PROVIDER.value}   model={settings.RERANKER_MODEL}"
           f"   active={settings.active_reranker}")

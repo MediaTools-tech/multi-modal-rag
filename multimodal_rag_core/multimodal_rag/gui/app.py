@@ -13,10 +13,18 @@ def _has_display() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+def _quiet_third_party_loggers() -> None:
+    """Keep harmless HF/cross-encoder probe logs out of the console."""
+    noisy = ("httpx", "httpcore", "huggingface_hub", "sentence_transformers", "transformers")
+    for name in noisy:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    _quiet_third_party_loggers()
     try:
         from PySide6.QtWidgets import QApplication
     except Exception:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
 from multimodal_rag.config import get_settings
 from multimodal_rag.gui.theme import get_palette
 
-
 # Matches bare http(s):// URLs that are not already part of a markdown link.
 _BARE_URL_RE = re.compile(r"(?<![\(\[<\"'=])(https?://[^\s<\)\]]+)")
 
@@ -29,7 +28,7 @@ _TRIM_TRAILING = ".,;:!?)]}'\""
 
 
 def linkify_bare_urls(text: str) -> str:
-    """Turn bare https://... URLs into markdown links so QLabel MarkdownText renders them clickable."""
+    """Turn bare https://... URLs into markdown links for clickable QLabel text."""
 
     def _repl(match: re.Match[str]) -> str:
         url = match.group(1)
@@ -71,6 +70,8 @@ class ChatPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._loading: QWidget | None = None
+        self._active_query_row: QWidget | None = None
+        self._scroll_anchor: QWidget | None = None
         self.palette = get_palette(get_settings().GUI_THEME.value)
         self._build()
 
@@ -128,9 +129,10 @@ class ChatPanel(QWidget):
         self.scroll_layout.setSpacing(14)
         self.scroll.setWidget(self.scroll_widget)
         layout.addWidget(self.scroll, 1)
-        # Stick to the newest message: the layout pass (word-wrap height) lands
-        # after addWidget returns, so a single immediate setValue(maximum) races
-        # it and the view can end up above the latest bubble.
+        # Anchor each exchange at its question: after the layout pass grows a
+        # long answer, keeping the view pinned to the bottom would push the
+        # question and the start of the answer out of view. The anchor is
+        # re-applied after wrap-height changes instead.
         self.scroll.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
 
         bottom = QHBoxLayout()
@@ -224,7 +226,9 @@ class ChatPanel(QWidget):
         row_layout.addStretch()
         row_layout.addWidget(bubble)
         self.scroll_layout.addWidget(row)
-        self._scroll_bottom()
+        self._active_query_row = row
+        self._scroll_anchor = row
+        self._scroll_to_anchor()
 
     def add_assistant_message(
         self, text: str, results: list | None = None, cited: set[int] | list[int] | None = None
@@ -347,7 +351,9 @@ class ChatPanel(QWidget):
         row_layout.addWidget(bubble)
         row_layout.addStretch()
         self.scroll_layout.addWidget(row)
-        self._scroll_bottom()
+        # Keep the current question visible with the start of its answer.
+        self._scroll_anchor = self._active_query_row or row
+        self._scroll_to_anchor()
 
     def show_loading(self) -> None:
         self._loading = QWidget()
@@ -357,7 +363,8 @@ class ChatPanel(QWidget):
         label.setStyleSheet(f"color: {self.palette.link}; font-style: italic;")
         layout.addWidget(label)
         self.scroll_layout.addWidget(self._loading)
-        self._scroll_bottom()
+        self._scroll_anchor = self._active_query_row or self._loading
+        self._scroll_to_anchor()
 
     def hide_loading(self) -> None:
         if self._loading is not None:
@@ -365,14 +372,31 @@ class ChatPanel(QWidget):
             self._loading.deleteLater()
             self._loading = None
 
-    def _scroll_bottom(self) -> None:
+    def _scroll_to_anchor(self) -> None:
+        """Move the viewport so the anchored question (or message) is at the top.
+
+        Qt finalizes wrapped label heights after addWidget returns, so the
+        immediate attempt is repeated on the next event-loop turns and again
+        from rangeChanged when the scrollable height settles.
+        """
+        self._apply_scroll_anchor()
+        QTimer.singleShot(50, self._apply_scroll_anchor)
+        QTimer.singleShot(300, self._apply_scroll_anchor)
+
+    def _apply_scroll_anchor(self) -> None:
+        anchor = self._scroll_anchor
+        if anchor is None:
+            return
+        try:
+            y = anchor.mapTo(self.scroll_widget, QPoint(0, 0)).y()
+        except RuntimeError:
+            # The anchor was deleted (e.g. transient loading row).
+            self._scroll_anchor = None
+            return
         bar = self.scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
-        QTimer.singleShot(50, lambda: bar.setValue(bar.maximum()))
-        QTimer.singleShot(300, lambda: bar.setValue(bar.maximum()))
+        bar.setValue(max(bar.minimum(), min(y, bar.maximum())))
 
     def _on_scroll_range_changed(self) -> None:
-        # Fires once the layout settles on its final height: snap to it so the
-        # newest message is always visible without manual scrolling.
-        bar = self.scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        # Fires when wrapped-label heights settle. Re-apply the anchor so a
+        # long answer never scrolls its own question out of view.
+        self._apply_scroll_anchor()

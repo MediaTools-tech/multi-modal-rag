@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
-from multimodal_rag.config import Settings, get_settings
+from multimodal_rag.config import Settings, SummarySemanticUnit, get_settings
 from multimodal_rag.database import get_repository
 from multimodal_rag.database.base_interface import DocumentRepository
 from multimodal_rag.ingestion.summarizer import DocumentSummarizer
 from multimodal_rag.pipeline.embedding import EmbeddingEngine, get_embedding_engine
+from multimodal_rag.pipeline.local_summarizer import LocalExtractiveSummarizer
 from multimodal_rag.utils.api_clients import build_summarize_fn, build_vlm_describer
 from multimodal_rag.utils.token_tracker import TokenTracker
 
@@ -48,8 +49,20 @@ def build_context(
             logger.warning("Embedding engine unavailable: %s", exc)
 
     vlm = build_vlm_describer(settings, tracker)
-    summarize_fn = build_summarize_fn(settings, tracker)
-    summarizer = DocumentSummarizer(summarize_fn, settings.SUMMARY_MAX_CHARS)
+    local_summarizer = None
+    if settings.summary_uses_local:
+        embed_texts = None
+        if settings.SUMMARY_SEMANTIC_UNIT is SummarySemanticUnit.SENTENCE:
+            if embedder is not None:
+                embed_texts = embedder.embed_texts
+        local_summarizer = LocalExtractiveSummarizer(settings, embed_texts=embed_texts)
+    summarize_fn = build_summarize_fn(settings, tracker) if settings.summary_needs_llm else None
+    summarizer = DocumentSummarizer(
+        summarize_fn,
+        settings.SUMMARY_MAX_CHARS,
+        settings=settings,
+        local_summarizer=local_summarizer,
+    )
 
     transcribe: Callable | None = None
     if not settings.is_doc_only:
