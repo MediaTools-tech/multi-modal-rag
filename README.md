@@ -63,7 +63,7 @@ Without AVX2, `pylance` aborts with `Illegal instruction` (a native crash, not a
         ├── pipeline/         # parsing, embeddings, media, registry
         ├── ingestion/        # durable SQLite queue, watcher, worker, `mrag-ingest`
         ├── gui/              # PySide6 desktop app (`mrag-gui`)
-        └── utils/            # api clients, rate limiting, token tracking
+        └── utils/            # api clients, rate limiting, token tracking, embedding budget
 ```
 
 ## Install
@@ -135,8 +135,9 @@ Copy `.env.example` to `.env`. Key settings:
 | `EMBEDDING_*` | embeddings purpose: provider, model, `EMBEDDINGS_API_KEY`, dimension |
 | `VLM_*` | vision purpose: provider, model, `VLM_API_KEY` |
 | `LLM_*` | text purpose: provider, model, `LLM_API_KEY` |
-| `SUMMARY_*` | local semantic LexRank (default) or LLM summaries; output/input budgets |
+| `SUMMARY_*` | local semantic LexRank (default) or LLM summaries; word/char budgets plus an automatic embedding-token-window clamp |
 | `SEARCH_MODE` | `auto` / `chunk` / `summary` / `hybrid` |
+| `TYPO_CORRECTION` | `LOCAL` (default, free edit-distance lookup), `LLM` (one text-LLM query rewrite per search), or `OFF` |
 | `MRAG_HOME` | app root for `.env`, `data/`, `state.db` (default `~/.multimodal_rag`, or cwd when a `.env` is present) |
 
 Providers are configured **by purpose** (embeddings / vlm / llm), each with its own provider, model
@@ -147,9 +148,14 @@ File-level summaries are local by default (`SUMMARY_PROVIDER=LOCAL`,
 vectors already computed during ingestion, so it adds no LLM call and no extra embedding call;
 NumPy is used when installed, with a pure-Python frequency fallback. `SUMMARY_TARGET_WORDS` and
 `SUMMARY_OUTPUT_MAX_CHARS` are text budgets, independent of `EMBEDDING_DIMENSION`, so they behave
-the same with 384-d and 768/1024/1536/3072-d models. Set `SUMMARY_SEMANTIC_UNIT=SENTENCE` for
-sentence-level LexRank (one extra embedding pass) or `SUMMARY_PROVIDER=LLM|AUTO` to use the
-configured text LLM. All `SUMMARY_*` settings are available in the GUI Settings screen.
+the same with 384-d and 768/1024/1536/3072-d models. They are also bounded by the configured
+embedding model's input-token window: summaries that would exceed it are automatically clamped
+(and a warning is logged) so the stored text matches the text that was embedded. Chunk source
+offsets are used to remove retrieval overlap before sentence selection, so summaries do not
+repeat boundary text. Set
+`SUMMARY_SEMANTIC_UNIT=SENTENCE` for sentence-level LexRank (one extra embedding pass) or
+`SUMMARY_PROVIDER=LLM|AUTO` to use the configured text LLM. All `SUMMARY_*` settings are
+available in the GUI Settings screen.
 
 Relative paths resolve against `MRAG_HOME`, not the current working directory.
 
@@ -185,6 +191,11 @@ mrag-query -i                    # interactive REPL
 | `summary` | file-level summary vectors only | no | "which files are about X?" |
 | `chunk` | passage-level chunk vectors only (pure semantic search) | no | fastest; literal passage lookup |
 
+`TYPO_CORRECTION=LOCAL` (default) compares unknown query words against the indexed vocabulary
+and replaces only close matches, with no API call. `TYPO_CORRECTION=LLM` asks the configured text
+LLM to rewrite the query once per search, falling back to local correction if no LLM is available.
+Both options are exposed in the GUI Settings screen; `OFF` disables correction.
+
 Desktop GUI (native, Windows/Linux/macOS; not in Docker). Qt Essentials is already included
 in `requirements.txt`, so after Option B you can just run it:
 
@@ -219,8 +230,15 @@ Practical notes:
   ("average per subject") stays fragile — RAG retrieves, it doesn't compute.
 - Scanned/image-only PDFs need Docling + OCR models (first run downloads a
   few hundred MB); without them such PDFs extract no text.
-- `DOC_CHUNK_SIZE` / `DOC_CHUNK_OVERLAP` (words) control passage size; very
-  large tables still split across chunks.
+- `DOC_CHUNK_SIZE` / `DOC_CHUNK_OVERLAP` (words) are upper bounds; chunks are
+  sentence-aware, target ~450 tokens, and are always capped at 90% of the
+  embedding model's input window so small models (MiniLM/bge-small) never
+  silently truncate a passage. `DOC_CHUNK_TOKENS` / `DOC_CHUNK_OVERLAP_TOKENS`
+  override the target (0 = auto); `mrag-doctor` prints the effective chunk
+  budget. Chunks store source offsets, so local summaries remove overlap before
+  selecting sentences instead of repeating boundary text. Changing chunk settings
+  (or upgrading from an older chunker) requires re-indexing. Very large tables
+  still split across chunks.
 
 ## Platform support
 

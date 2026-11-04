@@ -9,7 +9,15 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QStyle, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QStyle,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
 
 from multimodal_rag.config import get_settings
 from multimodal_rag.gui.theme import get_palette
@@ -118,6 +126,11 @@ def _path_link(path_str: str, link_color: str | None = None) -> str:
     )
 
 
+def _image_preview_html(path: Path, width: int = 280) -> str:
+    url = QUrl.fromLocalFile(str(path)).toString()
+    return f"<img src='{html.escape(url)}' width='{width}' />"
+
+
 def find_vlc() -> str | None:
     found = shutil.which("vlc") or shutil.which("vlc.exe")
     if found:
@@ -222,11 +235,21 @@ class PreviewPanel(QWidget):
         )
         body = (
             f"<h3>{html.escape(record.filename)}</h3>"
-            f"<p><b>Score:</b> {result.score:.3f} &nbsp; <b>Type:</b> {html.escape(record.record_type)}</p>"
+            f"<p><b>Score:</b> {result.score:.3f} &nbsp; "
+            f"<b>Type:</b> {html.escape(record.record_type)}</p>"
             f"<p><b>Path:</b> {_path_link(record.source_path, self.palette.link)}</p>"
             f"{stamp}"
             f"<hr/>"
         )
+        image_path = Path(record.source_path or "")
+        if record.file_type == "image" or image_path.suffix.lower() in _IMAGE_SUFFIXES:
+            if image_path.is_file():
+                body += f"<p>{_image_preview_html(image_path)}</p>"
+            else:
+                body += (
+                    f"<p style='color:{self.palette.text_muted}'>Image file not found "
+                    "at the indexed path (inbox files move after processing).</p>"
+                )
         content = record.content or ""
         if not content.strip():
             body += (
@@ -291,7 +314,8 @@ class PreviewPanel(QWidget):
                 header
                 + f"<p style='color:{self.palette.text_muted}'>Video file — "
                 "use the Play button below to open it from the start, or "
-                "ask a question in chat, then click a timestamped source link to preview it here.</p>"
+                "ask a question in chat, then click a timestamped source link "
+                "to preview it here.</p>"
                 + (passages or "")
                 + (_garbled_hint(name, self.palette.text_muted) if garbled else "")
             )
@@ -299,10 +323,7 @@ class PreviewPanel(QWidget):
             return
 
         if suffix in _IMAGE_SUFFIXES:
-            url = QUrl.fromLocalFile(str(path)).toString()
-            self.view.setHtml(
-                header + f"<img src='{html.escape(url)}' width='280' />"
-            )
+            self.view.setHtml(header + _image_preview_html(path))
             self._hide_play()
             return
 
@@ -319,7 +340,8 @@ class PreviewPanel(QWidget):
             else:
                 self.view.setHtml(
                     header
-                    + f"<p style='color:{self.palette.text_muted}'>{html.escape(name)} — no indexed "
+                    + f"<p style='color:{self.palette.text_muted}'>"
+                    f"{html.escape(name)} — no indexed "
                     "passages yet (still queued, failed, or skipped). "
                     "Click the Path link above to open the file.</p>"
                 )
@@ -337,7 +359,10 @@ class PreviewPanel(QWidget):
                 )
                 self._hide_play()
                 return
-            self.view.setHtml(header + f"<pre style='white-space:pre-wrap'>{html.escape(text)}</pre>")
+            self.view.setHtml(
+                header
+                + f"<pre style='white-space:pre-wrap'>{html.escape(text)}</pre>"
+            )
             self._hide_play()
             return
 
@@ -353,7 +378,8 @@ class PreviewPanel(QWidget):
         else:
             self.view.setHtml(
                 header
-                + f"<p style='color:{self.palette.text_muted}'>No inline preview for this file type "
+                + f"<p style='color:{self.palette.text_muted}'>"
+                "No inline preview for this file type "
                 "and no indexed passages yet. Ask a question in chat, then click a source link "
                 "to see its indexed passages here — or open the file via the Path link above.</p>"
             )
@@ -398,7 +424,9 @@ class PreviewPanel(QWidget):
     def _on_play(self) -> None:
         path, timestamp = self._play_path, self._play_ts
         if path is None or not path.is_file():
-            QMessageBox.warning(self, "Cannot play", "The video file no longer exists at:\n" f"{path}")
+            QMessageBox.warning(
+                self, "Cannot play", f"The video file no longer exists at:\n{path}"
+            )
             return
         try:
             vlc = find_vlc()

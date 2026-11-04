@@ -15,6 +15,7 @@ from multimodal_rag.ingestion.worker import IngestionWorker
 from multimodal_rag.pipeline.context import PipelineContext, build_context
 from multimodal_rag.pipeline.registry import build_handlers
 from multimodal_rag.query import run_auto_search, run_search
+from multimodal_rag.search.typo import prepare_query
 from multimodal_rag.utils.api_clients import generate_rag_answer
 from multimodal_rag.utils.token_tracker import TokenTracker
 
@@ -37,6 +38,9 @@ class BackendService:
         # Retrieval mode that produced the last answer ("chunk"/"hybrid"/...).
         # Set by ask(); the GUI reads it for AUTO-fallback provenance.
         self.last_mode_used: str | None = None
+        # Query after typo correction, reused by AUTO's abstention retry so a
+        # configured LLM rewrite is paid for once per request.
+        self.last_prepared_query: str | None = None
         # Why the embedder is missing (version/download hint), if known.
         # build_context swallows engine-construction errors (lazy weights), so
         # capture the cheap eager checks here for the GUI to display.
@@ -133,7 +137,13 @@ class BackendService:
             return 1 if self.queue.enqueue_path(target) is not None else 0
         return 0
 
-    def search(self, query: str, mode: str | None = None, top_k: int | None = None):
+    def search(
+        self,
+        query: str,
+        mode: str | None = None,
+        top_k: int | None = None,
+        prepared_query: str | None = None,
+    ):
         if self.context is None or self.context.embedder is None:
             raise RuntimeError(
                 "Embedding engine not configured. Set EMBEDDING_PROVIDER=GOOGLE + "
@@ -143,23 +153,41 @@ class BackendService:
         if mode == SearchMode.AUTO.value:
             # Retrieval-only callers get the chunk-first fallback without the
             # answer verdict stage (no LLM spent); answers go through ask().
-            results, groups, _ = self.search_auto(query, top_k)
+            results, groups, _ = self.search_auto(query, top_k, prepared_query)
             return results, groups
         top_k = top_k or self.settings.SEARCH_TOP_K
         rerank = self.settings.active_reranker != "NONE"
-        logger.info("search query=%r mode=%s top_k=%s rerank=%s", query, mode, top_k, rerank)
+        prepared = prepared_query or prepare_query(
+            self.settings, self.context.repository, query, self.tracker
+        )
+        self.last_prepared_query = prepared
+        logger.info(
+            "search query=%r prepared=%r mode=%s top_k=%s rerank=%s",
+            query,
+            prepared,
+            mode,
+            top_k,
+            rerank,
+        )
         return run_search(
             self.settings,
             self.context.repository,
             self.context.embedder,
-            query,
+            prepared,
             mode,
             top_k,
             None,
             rerank,
+            self.tracker,
+            prepared=True,
         )
 
-    def search_auto(self, query: str, top_k: int | None = None):
+    def search_auto(
+        self,
+        query: str,
+        top_k: int | None = None,
+        prepared_query: str | None = None,
+    ):
         """Chunk-first retrieval; empty chunk results fall straight to hybrid.
 
         Returns (results, groups, mode_used). No LLM call is spent here — the
@@ -172,15 +200,27 @@ class BackendService:
             )
         top_k = top_k or self.settings.SEARCH_TOP_K
         rerank = self.settings.active_reranker != "NONE"
-        logger.info("search query=%r mode=auto(top_k=%s rerank=%s)", query, top_k, rerank)
+        prepared = prepared_query or prepare_query(
+            self.settings, self.context.repository, query, self.tracker
+        )
+        self.last_prepared_query = prepared
+        logger.info(
+            "search query=%r prepared=%r mode=auto(top_k=%s rerank=%s)",
+            query,
+            prepared,
+            top_k,
+            rerank,
+        )
         return run_auto_search(
             self.settings,
             self.context.repository,
             self.context.embedder,
-            query,
+            prepared,
             top_k,
             None,
             rerank,
+            self.tracker,
+            prepared=True,
         )
 
     def ask(
@@ -214,7 +254,12 @@ class BackendService:
             answer = self.answer(query, results) or ""
             if used == SearchMode.CHUNK.value and answer and is_abstention_answer(answer):
                 logger.info("auto: chunk answer abstained, retrying once with hybrid")
-                results, groups = self.search(query, SearchMode.HYBRID.value, top_k)
+                results, groups = self.search(
+                    query,
+                    SearchMode.HYBRID.value,
+                    top_k,
+                    prepared_query=self.last_prepared_query,
+                )
                 answer = ""
                 if results:
                     answer = self.answer(query, results) or ""

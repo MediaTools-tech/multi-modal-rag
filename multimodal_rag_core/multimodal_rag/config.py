@@ -113,6 +113,12 @@ class SearchMode(str, Enum):
     AUTO = "auto"
 
 
+class TypoCorrectionMode(str, Enum):
+    OFF = "OFF"
+    LOCAL = "LOCAL"
+    LLM = "LLM"
+
+
 class SummaryProvider(str, Enum):
     LOCAL = "LOCAL"
     LLM = "LLM"
@@ -163,6 +169,37 @@ KNOWN_EMBEDDING_DIMS: dict[str, set[int]] = {
     "google/embeddinggemma-2:full": {128, 256, 512, 768},
 }
 
+#: Approximate input-token windows for supported embedding models. Used to keep
+#: both chunks and generated summaries inside the window the embedder can
+#: actually read; vector dimension is deliberately not part of this calculation.
+KNOWN_EMBEDDING_MAX_TOKENS: dict[str, int] = {
+    "sentence-transformers/all-MiniLM-L6-v2": 256,
+    "BAAI/bge-small-en-v1.5": 512,
+    "BAAI/bge-base-en-v1.5": 512,
+    "BAAI/bge-m3": 8192,
+    "models/gemini-embedding-001": 2048,
+    "gemini-embedding-001": 2048,
+    "models/text-embedding-004": 2048,
+    "text-embedding-004": 2048,
+    "embed-english-v3.0": 512,
+    "embed-multilingual-v3.0": 512,
+}
+
+#: Conservative window for unknown/custom embedding models.
+EMBEDDING_MAX_TOKENS_FALLBACK = 512
+
+#: Fraction of the embedding window a summary may use, leaving room for any
+#: task prefix/special tokens the embedder adds.
+SUMMARY_EMBEDDING_TOKEN_RATIO = 0.8
+
+#: Fraction of the embedding window a chunk may use. Slightly higher than
+#: summaries because chunk overlap is expected to carry boundary context.
+CHUNK_EMBEDDING_TOKEN_RATIO = 0.9
+
+#: Default chunk target when DOC_CHUNK_TOKENS is 0. Large-window embedders still
+#: get bounded chunks instead of 8k-token passages; explicit values override it.
+CHUNK_DEFAULT_TOKENS = 450
+
 #: Base HuggingFace id for EmbeddingGemma 2 (single checkpoint, Apache-2.0,
 #: gated: accept the license + `huggingface-cli login`). The :suffix form is
 #: this app's convention to pick encoders in the EMBEDDING_MODEL dropdown.
@@ -211,6 +248,26 @@ def is_embeddinggemma_spec(model: str) -> bool:
     if name == EMBEDDINGGEMMA_MODEL_ID:
         return True
     return name.startswith(EMBEDDINGGEMMA_MODEL_ID + ":")
+
+
+def embedding_max_input_tokens(model: str) -> int:
+    """Best-known input window (tokens) for an embedding model.
+
+    Unknown/custom models get a conservative fallback. This intentionally does
+    not depend on ``EMBEDDING_DIMENSION``: MRL truncation changes vector size,
+    not how much text the encoder can read.
+    """
+    name = (model or "").strip()
+    if is_embeddinggemma_spec(name):
+        # EmbeddingGemma 2 shares one 2K-token text encoder across variants.
+        return 2048
+    limit = KNOWN_EMBEDDING_MAX_TOKENS.get(name)
+    if limit is not None:
+        return limit
+    limit = KNOWN_EMBEDDING_MAX_TOKENS.get(name.lower())
+    if limit is not None:
+        return limit
+    return EMBEDDING_MAX_TOKENS_FALLBACK
 
 
 def parse_embeddinggemma_spec(model: str) -> tuple[str, str, dict]:
@@ -368,6 +425,9 @@ class Settings(BaseSettings):
 
     SEARCH_TOP_K: int = 10
     SEARCH_MODE: SearchMode = SearchMode.HYBRID
+    # LOCAL = edit-distance correction against indexed vocabulary (default, free).
+    # LLM = one text-LLM query rewrite per search; OFF disables correction.
+    TYPO_CORRECTION: TypoCorrectionMode = TypoCorrectionMode.LOCAL
     HYBRID_RRF_K: int = 60
     ENABLE_DOCUMENT_SUMMARIES: bool = True
     SUMMARY_PROVIDER: SummaryProvider = SummaryProvider.LOCAL
@@ -428,8 +488,14 @@ class Settings(BaseSettings):
     LANCEDB_NUM_PARTITIONS: int = 256
 
     DOC_USE_OCR: bool = True
+    # Word caps retained for backward compatibility. Token-aware chunking
+    # additionally enforces the embedding model's input window.
     DOC_CHUNK_SIZE: int = 800
     DOC_CHUNK_OVERLAP: int = 100
+    # 0 = CHUNK_DEFAULT_TOKENS, capped by window * CHUNK_EMBEDDING_TOKEN_RATIO.
+    # Explicit values are clamped to the same safe cap.
+    DOC_CHUNK_TOKENS: int = 0
+    DOC_CHUNK_OVERLAP_TOKENS: int = 0
 
     MM_FRAME_STRATEGY: FrameStrategy = FrameStrategy.HYBRID
     MM_FRAME_SAMPLING_FPS: int = 2
@@ -505,6 +571,7 @@ class Settings(BaseSettings):
         "SUMMARY_PROVIDER",
         "SUMMARY_ALGORITHM",
         "SUMMARY_SEMANTIC_UNIT",
+        "TYPO_CORRECTION",
         mode="before",
     )
     @classmethod
@@ -577,6 +644,18 @@ class Settings(BaseSettings):
                 "LLM_TEMPERATURE must be between 0.0 (deterministic) and 1.0 "
                 "(1.0 is the highest value every text provider accepts)."
             )
+        return value
+
+    @field_validator(
+        "DOC_CHUNK_SIZE",
+        "DOC_CHUNK_OVERLAP",
+        "DOC_CHUNK_TOKENS",
+        "DOC_CHUNK_OVERLAP_TOKENS",
+    )
+    @classmethod
+    def _valid_chunk_limits(cls, value: int) -> int:
+        if int(value) < 0:
+            raise ValueError("Chunk size, token budget, and overlap must be non-negative.")
         return value
 
     @field_validator("SUMMARY_TARGET_WORDS")

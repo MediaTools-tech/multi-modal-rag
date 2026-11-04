@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from multimodal_rag.config import Settings, SummaryAlgorithm, SummarySemanticUnit
 from multimodal_rag.core.models import RecordType, VectorRecord
+from multimodal_rag.pipeline.chunking import chunk_source_span
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,25 @@ def trim_summary_text(text: str, max_words: int, max_chars: int) -> str:
     return text.strip()
 
 
+def deoverlap_record_texts(records: Sequence[VectorRecord]) -> list[str]:
+    parts: list[str] = []
+    previous_end: int | None = None
+    for record in records:
+        raw = record.content or ""
+        span = chunk_source_span(record.metadata)
+        if span is not None:
+            start, end = span
+            if previous_end is not None and start < previous_end:
+                raw = raw[min(len(raw), previous_end - start) :]
+            previous_end = max(previous_end, end) if previous_end is not None else end
+        else:
+            previous_end = None
+        part = clean_summary_text(raw)
+        if part:
+            parts.append(part)
+    return parts
+
+
 def _normalize_scores(values: Sequence[float]) -> list[float]:
     if not values:
         return []
@@ -248,9 +268,13 @@ def _even_sample(items: Sequence, limit: int) -> list:
     return [items[index] for index in indices]
 
 
-def _word_overlap(previous: str, following: str, max_overlap: int = 80) -> int:
+def _word_overlap(
+    previous: str, following: str, max_overlap: int | None = None
+) -> int:
     previous_words = previous.split()
     following_words = following.split()
+    if max_overlap is None:
+        max_overlap = max(80, min(len(previous_words), len(following_words)) // 2)
     limit = min(len(previous_words), len(following_words), max_overlap)
     for size in range(limit, 0, -1):
         if previous_words[-size:] == following_words[:size]:
@@ -261,6 +285,7 @@ def _word_overlap(previous: str, following: str, max_overlap: int = 80) -> int:
 def _stitch_texts(texts: Sequence[str]) -> str:
     output: list[str] = []
     previous = ""
+    previous_words: list[str] = []
     for text in texts:
         text = text.strip()
         if not text:
@@ -268,15 +293,18 @@ def _stitch_texts(texts: Sequence[str]) -> str:
         if not output:
             output.append(text)
             previous = text
+            previous_words = text.split()
             continue
         overlap = _word_overlap(previous, text)
+        following_words = text.split()
         if overlap:
-            following_words = text.split()
             output.append(" ".join(following_words[overlap:]))
-            previous = " ".join(previous.split() + following_words)
+            previous_words.extend(following_words[overlap:])
+            previous = " ".join(previous_words)
         else:
             output.append(text)
             previous = text
+            previous_words = following_words
     return " ".join(part for part in output if part).strip()
 
 
@@ -419,6 +447,10 @@ class LocalExtractiveSummarizer:
 
     def _records_text(self, records: Sequence[VectorRecord]) -> str:
         chosen = _even_sample(records, self.max_chunks)
+        if chosen and all(chunk_source_span(record.metadata) for record in chosen):
+            return _truncate_text(
+                " ".join(deoverlap_record_texts(chosen)), self.local_max_chars
+            )
         texts = [clean_summary_text(record.content) for record in chosen]
         return _truncate_text(_stitch_texts(texts), self.local_max_chars)
 
@@ -446,9 +478,24 @@ class LocalExtractiveSummarizer:
         selected_sorted = sorted(selected)
         sentences: list[_Sentence] = []
         seen: set[str] = set()
+        previous_end: int | None = None
+        selected_text_chars = 0
         for index in selected_sorted:
             parent_score = float(centrality[index])
-            for sentence in _split_sentences(active[index].text):
+            record = active[index].record
+            span = chunk_source_span(record.metadata)
+            if span is not None:
+                start, end = span
+                raw = record.content or ""
+                if previous_end is not None and start < previous_end:
+                    raw = raw[min(len(raw), previous_end - start) :]
+                previous_end = max(previous_end, end) if previous_end is not None else end
+                text = clean_summary_text(raw)
+            else:
+                previous_end = None
+                text = active[index].text
+            selected_text_chars += len(text)
+            for sentence in _split_sentences(text):
                 key = _sentence_key(sentence)
                 if not key or key in seen:
                     continue
@@ -471,7 +518,6 @@ class LocalExtractiveSummarizer:
         if not summary:
             return self._empty_summary(candidates, "FREQUENCY", "NONE", started, fallback=True)
 
-        selected_text_chars = sum(len(active[index].text) for index in selected)
         return LocalSummary(
             text=summary,
             algorithm=SummaryAlgorithm.SEMANTIC_LEXRANK.value,

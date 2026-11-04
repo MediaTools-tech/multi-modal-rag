@@ -4,14 +4,16 @@ import logging
 import time
 from collections.abc import Callable
 
-from multimodal_rag.config import Settings, SummaryProvider
+from multimodal_rag.config import EmbeddingProvider, Settings, SummaryProvider
 from multimodal_rag.core.models import RecordType, VectorRecord
 from multimodal_rag.pipeline.local_summarizer import (
     LocalExtractiveSummarizer,
     LocalSummary,
     clean_summary_text,
+    deoverlap_record_texts,
     trim_summary_text,
 )
+from multimodal_rag.utils.embedding_budget import fit_summary_to_embedding_limit
 
 logger = logging.getLogger(__name__)
 
@@ -74,22 +76,15 @@ class DocumentSummarizer:
         if not records or max_chars <= 0:
             return ""
         ordered = DocumentSummarizer._ordered_records(records)
-        total = sum(len(clean_summary_text(record.content or "")) for record in ordered)
+        parts = deoverlap_record_texts(ordered)
+        total = sum(len(part) for part in parts)
         if total <= max_chars:
-            joined = "\n\n".join(
-                part
-                for part in (clean_summary_text(record.content or "") for record in ordered)
-                if part
-            ).strip()
-            return trim_summary_text(joined, 0, max_chars)
+            return trim_summary_text("\n\n".join(parts).strip(), 0, max_chars)
         tail_chars = max(1, max_chars // 4)
         head_chars = max_chars - tail_chars - 2
         head_parts: list[str] = []
         used = 0
-        for record in ordered:
-            part = clean_summary_text(record.content or "")
-            if not part:
-                continue
+        for part in parts:
             remaining = head_chars - used
             if remaining <= 0:
                 break
@@ -100,10 +95,7 @@ class DocumentSummarizer:
                 used += len(part) + 2
         tail_parts: list[str] = []
         used = 0
-        for record in reversed(ordered):
-            part = clean_summary_text(record.content or "")
-            if not part:
-                continue
+        for part in reversed(parts):
             remaining = tail_chars - used
             if remaining <= 0:
                 break
@@ -209,6 +201,15 @@ class DocumentSummarizer:
         if not summary:
             return None
 
+        token_budget = 0
+        token_clamped = False
+        if self.settings is not None:
+            summary, token_budget, token_clamped = fit_summary_to_embedding_limit(
+                summary,
+                self.settings.EMBEDDING_MODEL,
+                local=self.settings.EMBEDDING_PROVIDER is EmbeddingProvider.LOCAL,
+            )
+
         modalities = sorted(
             {
                 str(record.metadata.get("modality", "")).strip()
@@ -239,6 +240,8 @@ class DocumentSummarizer:
                 "summary_semantic_unit": semantic_unit,
                 "summary_input_chars": input_chars,
                 "summary_output_words": len(summary.split()),
+                "summary_embedding_token_budget": token_budget,
+                "summary_embedding_token_clamped": token_clamped,
                 "summary_chunks_considered": chunks_considered,
                 "summary_chunks_selected": chunks_selected,
                 "summary_elapsed_ms": elapsed_ms,

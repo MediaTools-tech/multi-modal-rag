@@ -28,6 +28,7 @@ class PostgresProvider(DocumentRepository):
         self.dsn = settings.postgres_dsn
         self.table = settings.DB_TABLE_NAME
         self.dim = settings.EMBEDDING_DIMENSION
+        self._vocab_cache: dict[str, int] | None = None
 
     def _connect(self) -> psycopg.Connection:
         conn = psycopg.connect(self.dsn, row_factory=dict_row)
@@ -145,6 +146,7 @@ class PostgresProvider(DocumentRepository):
                 )
         finally:
             conn.close()
+        self._vocab_cache = None
         logger.info("PostgresProvider initialized (table=%s, dim=%s)", self.table, self.dim)
 
     def insert(self, records: list[VectorRecord]) -> int:
@@ -208,6 +210,7 @@ class PostgresProvider(DocumentRepository):
             conn.commit()
         finally:
             conn.close()
+        self._vocab_cache = None
         return len(rows)
 
     def search(
@@ -295,6 +298,34 @@ class PostgresProvider(DocumentRepository):
             )
         return results
 
+    def lexical_vocabulary(self, max_terms: int = 50000) -> dict[str, int]:
+        if self._vocab_cache is not None:
+            return self._vocab_cache
+        sql = f"""
+            SELECT word, COUNT(*) AS n
+            FROM (
+                SELECT lower(part) AS word
+                FROM {self.table},
+                     LATERAL regexp_split_to_table(
+                         coalesce(content, ''), '[^[:alnum:]'']+'
+                     ) AS part
+                WHERE part <> ''
+            ) words
+            WHERE char_length(word) BETWEEN 3 AND 64
+            GROUP BY word
+            ORDER BY n DESC, word ASC
+            LIMIT %s;
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (max_terms,))
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        self._vocab_cache = {str(row["word"]): int(row["n"]) for row in rows}
+        return self._vocab_cache
+
     def get_by_file_hash(self, file_hash: str) -> list[VectorRecord]:
         return self._fetch_records("WHERE file_hash = %s", (file_hash,))
 
@@ -326,6 +357,7 @@ class PostgresProvider(DocumentRepository):
         finally:
             conn.close()
         self.initialize()
+        self._vocab_cache = None
         return int(total)
 
     def get_stats(self) -> dict[str, int]:
@@ -390,6 +422,7 @@ class PostgresProvider(DocumentRepository):
             conn.commit()
         finally:
             conn.close()
+        self._vocab_cache = None
         return int(deleted)
 
     @staticmethod

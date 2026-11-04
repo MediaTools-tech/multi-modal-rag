@@ -42,7 +42,12 @@ def parse_image(path: Path, settings: Settings, vlm: Any | None = None) -> list[
     if not parts:
         return []
     combined = "\n\n".join(parts)
-    chunks = text_to_chunks(combined, settings.DOC_CHUNK_SIZE, settings.DOC_CHUNK_OVERLAP)
+    chunks = text_to_chunks(
+        combined,
+        settings.DOC_CHUNK_SIZE,
+        settings.DOC_CHUNK_OVERLAP,
+        settings=settings,
+    )
     for chunk in chunks:
         chunk.metadata.setdefault("modality", "image")
     return chunks

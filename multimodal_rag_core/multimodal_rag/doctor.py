@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from multimodal_rag.config import RoleSettings, get_settings
+from multimodal_rag.config import RoleSettings, embedding_max_input_tokens, get_settings
+from multimodal_rag.utils.embedding_budget import chunk_token_target, summary_token_budget
 
 
 def _state(role: RoleSettings, needs_key: bool) -> str:
@@ -30,6 +31,7 @@ def _print_summaries(settings) -> None:
     print(
         f"  output   : target_words={settings.SUMMARY_TARGET_WORDS}"
         f"   max_chars={settings.SUMMARY_OUTPUT_MAX_CHARS}"
+        f"   embed_token_cap={summary_token_budget(settings.EMBEDDING_MODEL)}"
     )
     print(
         f"  input    : llm_max_chars={settings.SUMMARY_MAX_CHARS}"
@@ -47,11 +49,30 @@ def _print_summaries(settings) -> None:
     print()
 
 
+def _print_chunking(settings) -> None:
+    model = settings.EMBEDDING_MODEL
+    window = embedding_max_input_tokens(model)
+    configured = int(settings.DOC_CHUNK_TOKENS or 0)
+    effective = chunk_token_target(model, configured)
+    overlap = int(settings.DOC_CHUNK_OVERLAP_TOKENS or 0)
+    print("CHUNKING    sentence-aware token-budgeted passage splitting")
+    print(f"  words    : size={settings.DOC_CHUNK_SIZE}   overlap={settings.DOC_CHUNK_OVERLAP}")
+    print(
+        f"  tokens   : configured={configured or 'auto'}   effective={effective}"
+        f"   model_window={window}   overlap={overlap or 'auto'}"
+    )
+    print()
+
+
 def _print_fingerprint(settings) -> None:
     """Show the stored index fingerprint vs current index-time config."""
     import json
 
-    from multimodal_rag.ingestion.state import INDEX_FINGERPRINT_KEYS, StateStore
+    from multimodal_rag.ingestion.state import (
+        INDEX_FINGERPRINT_KEYS,
+        StateStore,
+        fingerprint_of,
+    )
 
     print("INDEX       fingerprint (index-time settings baked into stored vectors)")
     try:
@@ -67,10 +88,10 @@ def _print_fingerprint(settings) -> None:
         stored = json.loads(raw)
     except ValueError:
         stored = {}
+    current_values = fingerprint_of(settings)
     drift = False
     for key in INDEX_FINGERPRINT_KEYS:
-        value = getattr(settings, key)
-        current = value.value if hasattr(value, "value") else str(value)
+        current = current_values[key]
         mark = "" if stored.get(key) == current else "   <-- DIFFERS"
         drift = drift or bool(mark)
         print(f"  {key:<20} stored={stored.get(key)!r} current={current!r}{mark}")
@@ -110,9 +131,12 @@ def main(argv: list[str] | None = None) -> int:
         print()
 
     _print_summaries(settings)
+    _print_chunking(settings)
     print("RERANKER    cross-encoder over fused candidates")
     print(f"  provider : {settings.RERANKER_PROVIDER.value}   model={settings.RERANKER_MODEL}"
           f"   active={settings.active_reranker}")
+    print()
+    print(f"TYPO        query spelling correction: {settings.TYPO_CORRECTION.value}")
     print()
     _print_fingerprint(settings)
     print()

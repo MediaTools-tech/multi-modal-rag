@@ -38,6 +38,14 @@ class DocumentRepository(ABC):
     ) -> list[SearchResult]:
         ...
 
+    def lexical_vocabulary(self, max_terms: int = 50000) -> dict[str, int]:
+        """Indexed word forms and frequencies used by local typo correction.
+
+        Optional capability: backends that cannot cheaply provide it return an
+        empty mapping and local correction becomes a no-op.
+        """
+        return {}
+
     @abstractmethod
     def get_by_file_hash(self, file_hash: str) -> list[VectorRecord]:
         ...

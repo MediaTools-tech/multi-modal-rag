@@ -4,8 +4,6 @@ import logging
 from enum import Enum
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
@@ -25,10 +23,13 @@ from multimodal_rag.config import (
     get_settings,
 )
 
+logger = logging.getLogger(__name__)
+
 ENUM_CHOICES = {
     "GUI_THEME": ["Midnight", "Graphite", "Ocean", "Daylight"],
     "SYSTEM_MODE": ["DOC_ONLY_RAG", "MULTI_MODAL_RAG"],
     "SEARCH_MODE": ["auto", "hybrid", "summary", "chunk"],
+    "TYPO_CORRECTION": ["LOCAL", "LLM", "OFF"],
     "SUMMARY_PROVIDER": ["LOCAL", "LLM", "AUTO"],
     "SUMMARY_ALGORITHM": ["SEMANTIC_LEXRANK", "FREQUENCY"],
     "SUMMARY_SEMANTIC_UNIT": ["CHUNK", "SENTENCE"],
@@ -53,7 +54,16 @@ ENUM_CHOICES = {
 #: table is fixed from .env, and POSTGRES_DB / LANCEDB_DIR are the GUI knobs
 #: for separate stores.
 SECTIONS: list[tuple[str, list[str]]] = [
-    ("General", ["GUI_THEME", "SYSTEM_MODE", "SEARCH_MODE", "ACTIVE_DB_ENGINE"]),
+    (
+        "General",
+        [
+            "GUI_THEME",
+            "SYSTEM_MODE",
+            "SEARCH_MODE",
+            "TYPO_CORRECTION",
+            "ACTIVE_DB_ENGINE",
+        ],
+    ),
     (
         "Embeddings",
         [
@@ -108,7 +118,13 @@ SECTIONS: list[tuple[str, list[str]]] = [
     ),
     (
         "Document Parsing",
-        ["DOC_USE_OCR", "DOC_CHUNK_SIZE", "DOC_CHUNK_OVERLAP"],
+        [
+            "DOC_USE_OCR",
+            "DOC_CHUNK_SIZE",
+            "DOC_CHUNK_OVERLAP",
+            "DOC_CHUNK_TOKENS",
+            "DOC_CHUNK_OVERLAP_TOKENS",
+        ],
     ),
 ]
 

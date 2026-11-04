@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ class LanceDBProvider(DocumentRepository):
         self._table: Any = None
         self._write_lock = threading.Lock()
         self._dirty = False
+        self._vocab_cache: dict[str, int] | None = None
 
     def _schema(self) -> Any:
         import pyarrow as pa
@@ -76,6 +78,7 @@ class LanceDBProvider(DocumentRepository):
             )
         self._ensure_fts_index()
         self._ensure_vector_index()
+        self._vocab_cache = None
         logger.info(
             "LanceDBProvider initialized (dir=%s, table=%s)", self.db_path, self.table_name
         )
@@ -203,6 +206,7 @@ class LanceDBProvider(DocumentRepository):
             # (IngestionWorker flushes on idle/stop), so a 1,000-file import does
             # one rebuild instead of 1,000.
             self._dirty = True
+            self._vocab_cache = None
         return len(data)
 
     def search(
@@ -299,6 +303,19 @@ class LanceDBProvider(DocumentRepository):
                 break
         return results
 
+    def lexical_vocabulary(self, max_terms: int = 50000) -> dict[str, int]:
+        if self._vocab_cache is not None:
+            return self._vocab_cache
+        frame = self._table.to_pandas()
+        if frame.empty or "content" not in frame:
+            self._vocab_cache = {}
+            return self._vocab_cache
+        counts: Counter[str] = Counter()
+        for text in frame["content"].dropna():
+            counts.update(tokenize(str(text)))
+        self._vocab_cache = dict(counts.most_common(max_terms))
+        return self._vocab_cache
+
     def get_by_file_hash(self, file_hash: str) -> list[VectorRecord]:
         frame = self._table.to_pandas()
         if frame.empty:
@@ -323,6 +340,7 @@ class LanceDBProvider(DocumentRepository):
         deleted = self._count(lambda f: f["source_path"] == source_path)
         with self._write_lock:
             self._table.delete(f"source_path = '{_sql_escape(source_path)}'")
+            self._vocab_cache = None
         return deleted
 
     def delete_by_folder(self, folder_path: str) -> int:
@@ -335,6 +353,7 @@ class LanceDBProvider(DocumentRepository):
             self._table.delete(
                 f"parent_directory LIKE '{safe}%' OR source_path LIKE '{safe}%'"
             )
+            self._vocab_cache = None
         return deleted
 
     def clear(self) -> int:
@@ -344,6 +363,7 @@ class LanceDBProvider(DocumentRepository):
             if self.table_name in self._conn.table_names():
                 self._conn.drop_table(self.table_name)
         self.initialize()
+        self._vocab_cache = None
         return int(total)
 
     def get_stats(self) -> dict[str, int]:

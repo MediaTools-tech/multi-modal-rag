@@ -10,13 +10,14 @@ from multimodal_rag.database import get_repository
 from multimodal_rag.pipeline.embedding import get_embedding_engine
 from multimodal_rag.search.hybrid import hybrid_search
 from multimodal_rag.search.reranker import CrossEncoderReranker
+from multimodal_rag.search.typo import prepare_query
 from multimodal_rag.utils.api_clients import generate_rag_answer
 from multimodal_rag.utils.token_tracker import TokenTracker
 
 logger = logging.getLogger("mrag-query")
 
 
-def run_search(
+def _run_search(
     settings,
     repo,
     embedder,
@@ -57,7 +58,25 @@ def run_search(
     )
 
 
-def run_auto_search(
+def run_search(
+    settings,
+    repo,
+    embedder,
+    query: str,
+    mode: str,
+    top_k: int,
+    folder: str | None,
+    rerank: bool,
+    tracker=None,
+    *,
+    prepared: bool = False,
+):
+    if not prepared:
+        query = prepare_query(settings, repo, query, tracker)
+    return _run_search(settings, repo, embedder, query, mode, top_k, folder, rerank)
+
+
+def _run_auto_search(
     settings,
     repo,
     embedder,
@@ -66,21 +85,38 @@ def run_auto_search(
     folder: str | None,
     rerank: bool,
 ):
-    """AUTO retrieval: chunk first, empty results fall back to hybrid.
-
-    L1 of the AUTO strategy — costs no LLM call. Returns
-    (results, groups, mode_used).
-    """
-    results, groups = run_search(
+    results, groups = _run_search(
         settings, repo, embedder, query, SearchMode.CHUNK.value, top_k, folder, False
     )
     if results:
         return results, groups, SearchMode.CHUNK.value
     logger.info("auto: chunk empty, falling back to hybrid (no answer spent)")
-    results, groups = run_search(
+    results, groups = _run_search(
         settings, repo, embedder, query, SearchMode.HYBRID.value, top_k, folder, rerank
     )
     return results, groups, SearchMode.HYBRID.value
+
+
+def run_auto_search(
+    settings,
+    repo,
+    embedder,
+    query: str,
+    top_k: int,
+    folder: str | None,
+    rerank: bool,
+    tracker=None,
+    *,
+    prepared: bool = False,
+):
+    """AUTO retrieval: chunk first, empty results fall back to hybrid.
+
+    L1 of the AUTO strategy — costs no LLM call unless typo correction is set
+    to LLM. Returns (results, groups, mode_used).
+    """
+    if not prepared:
+        query = prepare_query(settings, repo, query, tracker)
+    return _run_auto_search(settings, repo, embedder, query, top_k, folder, rerank)
 
 
 def run_auto_query(
@@ -92,6 +128,7 @@ def run_auto_query(
     folder: str | None,
     rerank: bool,
     answer_fn=None,
+    tracker=None,
 ):
     """AUTO end-to-end: L1 (empty chunk -> hybrid) plus L2 (abstaining chunk
     answer -> one hybrid retry). answer_fn(results) -> str|None; None skips
@@ -99,16 +136,24 @@ def run_auto_query(
     """
     from multimodal_rag.utils.api_clients import is_abstention_answer
 
-    results, groups, used = run_auto_search(
-        settings, repo, embedder, query, top_k, folder, rerank
+    prepared = prepare_query(settings, repo, query, tracker)
+    results, groups, used = _run_auto_search(
+        settings, repo, embedder, prepared, top_k, folder, rerank
     )
     answer = ""
     if answer_fn is not None and results:
         answer = answer_fn(results) or ""
         if used == SearchMode.CHUNK.value and answer and is_abstention_answer(answer):
             logger.info("auto: chunk answer abstained, retrying once with hybrid")
-            results, groups = run_search(
-                settings, repo, embedder, query, SearchMode.HYBRID.value, top_k, folder, rerank
+            results, groups = _run_search(
+                settings,
+                repo,
+                embedder,
+                prepared,
+                SearchMode.HYBRID.value,
+                top_k,
+                folder,
+                rerank,
             )
             answer = ""
             if results:
@@ -185,14 +230,33 @@ def _handle(settings, repo, embedder, tracker, args, query: str) -> int:
     if args.mode == SearchMode.AUTO.value:
         answer_fn = None
         if args.answer:
-            answer_fn = lambda res: synthesize_answer(settings, tracker, query, res)
+
+            def answer_fn(res):
+                return synthesize_answer(settings, tracker, query, res)
+
         results, groups, answer, used = run_auto_query(
-            settings, repo, embedder, query, args.top_k, args.folder, args.rerank, answer_fn
+            settings,
+            repo,
+            embedder,
+            query,
+            args.top_k,
+            args.folder,
+            args.rerank,
+            answer_fn,
+            tracker,
         )
         print(f"[auto] retrieval mode used: {used}")
     else:
         results, groups = run_search(
-            settings, repo, embedder, query, args.mode, args.top_k, args.folder, args.rerank
+            settings,
+            repo,
+            embedder,
+            query,
+            args.mode,
+            args.top_k,
+            args.folder,
+            args.rerank,
+            tracker,
         )
         if args.answer and not args.json:
             answer = synthesize_answer(settings, tracker, query, results) or ""
@@ -214,7 +278,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-k", "--top-k", type=int, default=None)
     parser.add_argument("--folder", default=None, help="restrict to a source_path prefix")
-    parser.add_argument("--answer", action="store_true", help="synthesize an answer via the text LLM")
+    parser.add_argument(
+        "--answer", action="store_true", help="synthesize an answer via the text LLM"
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--rerank", dest="rerank", action="store_true", default=None)
     parser.add_argument("--no-rerank", dest="rerank", action="store_false")

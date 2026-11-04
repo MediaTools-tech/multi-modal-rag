@@ -20,7 +20,12 @@ def parse_document(path: Path, settings: Settings) -> list[Chunk]:
     text = _extract_text(path, settings)
     if not text or not text.strip():
         return []
-    return text_to_chunks(text, settings.DOC_CHUNK_SIZE, settings.DOC_CHUNK_OVERLAP)
+    return text_to_chunks(
+        text,
+        settings.DOC_CHUNK_SIZE,
+        settings.DOC_CHUNK_OVERLAP,
+        settings=settings,
+    )
 
 
 def _extract_text(path: Path, settings: Settings) -> str:
