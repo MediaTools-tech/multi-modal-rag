@@ -192,6 +192,7 @@ class MainWindow(QMainWindow):
             return
         self._models_warmed = True
         self.chat_panel.set_backend_state(True)
+        self.chat_panel.focus_input()
         if not getattr(self, "_greeted", False):
             self._greeted = True
             self.chat_panel.add_assistant_message(
@@ -462,6 +463,7 @@ class MainWindow(QMainWindow):
         if worker is self._search_worker:
             self._search_worker = None
         self.chat_panel.set_busy(False)
+        self.chat_panel.focus_input()
 
     @Slot(object, object, str, str)
     def _on_search_done(self, results, groups, answer: str, error: str) -> None:

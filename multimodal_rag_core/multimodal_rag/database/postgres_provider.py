@@ -449,6 +449,19 @@ class PostgresProvider(DocumentRepository):
         data.pop("content_tsv", None)
         data.pop("distance", None)
         data.pop("lex_score", None)
+        # pgvector stores the column as "embedding"; VectorRecord calls it
+        # "vector". Without this rename, iter_records() exports empty vectors
+        # and LanceDB rejects the copy with a FixedSizeList cast error.
+        embedding = data.pop("embedding", None)
+        if embedding is not None:
+            # pgvector's psycopg adapter returns its own Vector wrapper, which
+            # is not iterable; to_list() handles it, while the fallback keeps
+            # compatibility with plain lists/arrays.
+            data["vector"] = (
+                embedding.to_list()
+                if hasattr(embedding, "to_list")
+                else [float(value) for value in embedding]
+            )
         if data.get("id") is not None:
             data["id"] = str(data["id"])
         metadata = data.pop("metadata_json", None)

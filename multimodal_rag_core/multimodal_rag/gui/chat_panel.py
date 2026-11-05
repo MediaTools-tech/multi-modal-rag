@@ -174,6 +174,11 @@ class ChatPanel(QWidget):
             self._busy_reason = reason or "Searching... please wait."
         self._update_query_enabled()
 
+    def focus_input(self) -> None:
+        """Return keyboard focus to the query box after a response."""
+        if self.input.isEnabled():
+            self.input.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _update_query_enabled(self) -> None:
         enabled = self._backend_ready and not self._busy
         self.input.setEnabled(enabled)
