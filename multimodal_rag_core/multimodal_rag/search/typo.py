@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from collections.abc import Mapping
 from difflib import SequenceMatcher
+from typing import Any
 
 from multimodal_rag.config import Settings, TypoCorrectionMode
 
 logger = logging.getLogger(__name__)
+
+_SPELL_CACHE: tuple[Mapping[str, int], Any] | None = None
+_SPELL_LOCK = threading.Lock()
 
 _TOKEN_RE = re.compile(r"[^\W_][\w'+-]*", re.UNICODE)
 TYPO_CORRECTION_PROMPT = (
@@ -26,16 +31,20 @@ def correct_query_local(
 ) -> str:
     """Correct unknown query words against indexed word forms.
 
-    Only out-of-vocabulary words are touched. Candidates must be within a small
-    Damerau-Levenshtein distance, so names and codes are left alone unless they
-    are genuinely close to an indexed word.
+    Only out-of-vocabulary words are touched. SymSpell's deletion index provides
+    fast candidate lookup over the corpus vocabulary; candidates must still be
+    within a small Damerau-Levenshtein distance, so names and codes are left
+    alone unless they are genuinely close to an indexed word. If symspellpy is
+    unavailable, the small built-in matcher keeps local correction working.
     """
     if not query or not vocabulary:
         return query
 
+    spell = _symspell_for(vocabulary)
     buckets: dict[int, list[tuple[str, int]]] = {}
-    for word, frequency in vocabulary.items():
-        buckets.setdefault(len(word), []).append((word, int(frequency)))
+    if spell is None:
+        for word, frequency in vocabulary.items():
+            buckets.setdefault(len(word), []).append((word, int(frequency)))
 
     replacements: list[tuple[int, int, str]] = []
     for match in _TOKEN_RE.finditer(query):
@@ -46,7 +55,11 @@ def correct_query_local(
         if any(character.isdigit() for character in word):
             continue
         max_edits = 1 if len(word) <= 6 else 2
-        candidate = _best_candidate(word, buckets, max_edits)
+        candidate = (
+            _best_symspell_candidate(spell, word, max_edits)
+            if spell is not None
+            else _best_candidate(word, buckets, max_edits)
+        )
         if candidate and candidate != word:
             replacements.append(
                 (match.start(), match.end(), _match_case(original, candidate))
@@ -117,6 +130,58 @@ def prepare_query(settings: Settings, repo, query: str, tracker=None) -> str:
     if corrected != query:
         logger.info("typo correction (local): %r -> %r", query, corrected)
     return corrected
+
+
+def _symspell_for(vocabulary: Mapping[str, int]):
+    """Build/reuse a SymSpell index for one backend vocabulary snapshot."""
+    global _SPELL_CACHE
+    with _SPELL_LOCK:
+        cached = _SPELL_CACHE
+    if cached is not None and cached[0] is vocabulary:
+        return cached[1]
+    try:
+        from symspellpy import SymSpell
+    except ImportError:
+        logger.warning("symspellpy is not installed; using built-in typo matcher")
+        return None
+    spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+    for word, frequency in vocabulary.items():
+        count = int(frequency)
+        if word and count > 0:
+            spell.create_dictionary_entry(word, count)
+    with _SPELL_LOCK:
+        _SPELL_CACHE = (vocabulary, spell)
+    return spell
+
+
+def _best_symspell_candidate(spell: Any, word: str, max_edits: int) -> str | None:
+    from symspellpy import Verbosity
+
+    suggestions = spell.lookup(
+        word,
+        Verbosity.CLOSEST,
+        max_edit_distance=max_edits,
+        include_unknown=False,
+    )
+    best: tuple[int, int, int, str] | None = None
+    for suggestion in suggestions:
+        candidate = suggestion.term
+        if candidate == word:
+            continue
+        if len(word) <= 4 and SequenceMatcher(None, word, candidate).ratio() <= 0.75:
+            continue
+        distance = int(suggestion.distance)
+        if distance > max_edits:
+            continue
+        score = (
+            distance,
+            0 if candidate[:1] == word[:1] else 1,
+            -int(suggestion.count),
+            candidate,
+        )
+        if best is None or score < best:
+            best = score
+    return best[3] if best is not None else None
 
 
 def _best_candidate(

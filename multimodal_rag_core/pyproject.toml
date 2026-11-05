@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
+    "symspellpy>=6.7",
     "watchdog>=4.0",
     "google-genai>=1.0",
     "openai>=1.0",
@@ -56,6 +57,7 @@ all = [
 
 [project.scripts]
 mrag-ingest = "multimodal_rag.ingestion.cli:main"
+mrag-db-copy = "multimodal_rag.database.migrate:main"
 mrag-query = "multimodal_rag.query:main"
 mrag-gui = "multimodal_rag.gui.app:main"
 mrag-doctor = "multimodal_rag.doctor:main"

@@ -23,6 +23,7 @@ class IngestPanel(QWidget):
     add_files = Signal()
     open_inbox = Signal()
     refresh = Signal()
+    reindex_missing = Signal()
     file_selected = Signal(object)
     remove_file = Signal(object)
 
@@ -57,7 +58,9 @@ class IngestPanel(QWidget):
         self.table = QTableWidget(0, 3, self)
         self.table.setHorizontalHeaderLabels(["File", "Status", "Error"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -67,7 +70,15 @@ class IngestPanel(QWidget):
         layout.addWidget(self.table, 1)
 
         self.btn_refresh = QPushButton("Refresh")
+        self.btn_refresh.setToolTip("Re-check the queue and the current index.")
         self.btn_refresh.clicked.connect(self.refresh.emit)
+        self.btn_reindex = QPushButton("Reindex")
+        self.btn_reindex.setToolTip(
+            "Queue processed files whose vectors are missing from the current index "
+            "(for example after switching DB engines without mrag-db-copy)."
+        )
+        self.btn_reindex.setEnabled(False)
+        self.btn_reindex.clicked.connect(self.reindex_missing.emit)
         self.btn_remove = QPushButton("Remove selected")
         self.btn_remove.setToolTip(
             "Remove the selected file(s) from the list and delete their indexed records. "
@@ -78,6 +89,7 @@ class IngestPanel(QWidget):
         self.btn_remove.clicked.connect(self._on_remove_clicked)
         bottom = QHBoxLayout()
         bottom.addWidget(self.btn_refresh)
+        bottom.addWidget(self.btn_reindex)
         bottom.addWidget(self.btn_remove)
         layout.addLayout(bottom)
 
@@ -95,12 +107,14 @@ class IngestPanel(QWidget):
             # Nothing changed: leave the table (and the user's in-progress
             # Ctrl+click multi-selection) completely untouched. Rebuilding here
             # every 2s is what collapsed multi-selections down to one row.
+            self.btn_reindex.setEnabled(bool(stale))
             self.btn_remove.setEnabled(bool(self.selected_records()))
             return
         self._last_sig = sig
         # Snapshot the selection before tearing the rows down.
         selected_paths: set[str] = set()
-        for row in self.table.selectionModel().selectedRows() if self.table.selectionModel() else []:
+        selection = self.table.selectionModel()
+        for row in selection.selectedRows() if selection else []:
             if 0 <= row.row() < len(self._displayed):
                 selected_paths.add(self._displayed[row.row()].path)
         self._displayed = ordered
@@ -133,6 +147,7 @@ class IngestPanel(QWidget):
                 model.select(sel, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
         finally:
             self.table.blockSignals(False)
+        self.btn_reindex.setEnabled(bool(stale))
         self.btn_remove.setEnabled(bool(self.selected_records()))
 
     def _on_selection(self) -> None:

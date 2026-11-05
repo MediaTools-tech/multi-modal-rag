@@ -14,6 +14,9 @@ pydantic>=2.0
 pydantic-settings>=2.0
 python-dotenv>=1.0
 
+# Fast local typo correction (corpus vocabulary, no dictionary download)
+symspellpy>=6.7
+
 # Ingestion queue (watched inbox)
 watchdog>=4.0
 

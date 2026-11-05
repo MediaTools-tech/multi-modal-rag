@@ -54,12 +54,12 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 #: Index-time settings baked into every stored vector. Changing any of these
-#: orphans the index (see BackendService.check_fingerprint). SYSTEM_MODE is
-#: deliberately NOT here: it is a content policy / default-engine preset, not a
-#: property of the vectors, so switching doc-only <-> multimodal never needs a
-#: re-index (a resulting engine change is caught via ACTIVE_DB_ENGINE).
+#: orphans the index (see BackendService.check_fingerprint). SYSTEM_MODE and
+#: ACTIVE_DB_ENGINE are deliberately NOT here: they choose where an index lives,
+#: not how vectors are made, so switching engines (after mrag-db-copy) or modes
+#: never needs a re-index. The active database identity is still covered by the
+#: DSN/LanceDB path keys below.
 INDEX_FINGERPRINT_KEYS = (
-    "ACTIVE_DB_ENGINE",
     "POSTGRES_DSN",
     "LANCEDB_DIR",
     "DB_TABLE_NAME",
@@ -122,7 +122,7 @@ class FileRecord:
     output: str | None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "FileRecord":
+    def from_row(cls, row: sqlite3.Row) -> FileRecord:
         return cls(
             id=row["id"],
             path=row["path"],
@@ -155,6 +155,59 @@ class StateStore:
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
+
+    def copy_from(self, source_db_path: str | Path, *, replace: bool = False) -> int:
+        """Merge queue/status rows from another engine's state.db.
+
+        Used by ``mrag-db-copy`` when the state DB is engine-keyed (blank
+        ``STATE_DB_PATH``), so a migrated store otherwise looks empty in the GUI.
+        Existing target paths are updated in place; ``replace`` removes target
+        rows first.
+        """
+        source = Path(source_db_path)
+        if not source.is_file() or source.resolve() == self.db_path.resolve():
+            return 0
+        conn = self._connect()
+        try:
+            if replace:
+                conn.execute("DELETE FROM files")
+                conn.commit()
+            conn.execute("ATTACH DATABASE ? AS source_db", (str(source),))
+            try:
+                row = conn.execute("SELECT COUNT(*) AS n FROM source_db.files").fetchone()
+                copied = int(row["n"]) if row is not None else 0
+                conn.execute(
+                    """
+                    INSERT INTO files (
+                        path, sha256, size, mtime, kind, status, attempts,
+                        error, output, created_at, updated_at
+                    )
+                    SELECT path, sha256, size, mtime, kind, status, attempts,
+                           error, output, created_at, updated_at
+                    FROM source_db.files
+                    WHERE true
+                    ON CONFLICT(path) DO UPDATE SET
+                        sha256=excluded.sha256,
+                        size=excluded.size,
+                        mtime=excluded.mtime,
+                        kind=excluded.kind,
+                        status=excluded.status,
+                        attempts=excluded.attempts,
+                        error=excluded.error,
+                        output=excluded.output,
+                        created_at=excluded.created_at,
+                        updated_at=excluded.updated_at
+                    """
+                )
+                conn.commit()
+            finally:
+                try:
+                    conn.execute("DETACH DATABASE source_db")
+                except sqlite3.OperationalError:
+                    pass
+        finally:
+            conn.close()
+        return copied
 
     @staticmethod
     def _stat_signature(path: str | Path) -> tuple[int, float] | None:
@@ -198,7 +251,8 @@ class StateStore:
             else:
                 file_id = int(row["id"])
                 conn.execute(
-                    "UPDATE files SET kind=?, status=?, error=NULL, attempts=0, updated_at=? WHERE id=?",
+                    "UPDATE files SET kind=?, status=?, error=NULL, attempts=0, "
+                    "updated_at=? WHERE id=?",
                     (kind, DISCOVERED, now, file_id),
                 )
             conn.commit()
@@ -327,7 +381,8 @@ class StateStore:
             now = time.time()
             if file_id is None:
                 cur = conn.execute(
-                    "UPDATE files SET status=?, attempts=0, error=NULL, updated_at=? WHERE status=?",
+                    "UPDATE files SET status=?, attempts=0, error=NULL, updated_at=? "
+                    "WHERE status=?",
                     (DISCOVERED, now, FAILED),
                 )
             else:
@@ -396,7 +451,8 @@ class StateStore:
         try:
             conn.execute(
                 "INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
                 (key, value, time.time()),
             )
             conn.commit()

@@ -27,32 +27,43 @@ class WarmupWorker(QThread):
     The embedding model and reranker are loaded lazily on the first query,
     which makes that first search pay checkpoint load + tokenizer init +
     threadpool/kernel warmup synchronously. Running one throwaway inference
-    here moves that one-time cost to the background. Non-fatal on failure.
+    here moves that one-time cost to the background. Emits an error message
+    if either required model could not be warmed up.
     """
+
+    warmed = Signal(str)  # empty string on success, error message otherwise
 
     def __init__(self, service: BackendService) -> None:
         super().__init__()
         self.service = service
 
     def run(self) -> None:
+        errors: list[str] = []
         context = self.service.context
         embedder = getattr(context, "embedder", None) if context is not None else None
         if embedder is not None:
             try:
                 embedder.warmup()
             except Exception as exc:  # noqa: BLE001
-                print(f"[warmup] embedding warmup failed: {exc}", flush=True)
+                message = f"embedding: {type(exc).__name__}: {exc}"
+                print(f"[warmup] {message}", flush=True)
+                errors.append(message)
         if self.service.settings.active_reranker != "NONE":
-            from multimodal_rag.search.reranker import CrossEncoderReranker
-
             try:
-                CrossEncoderReranker(
+                from multimodal_rag.search.reranker import CrossEncoderReranker
+
+                reranker = CrossEncoderReranker(
                     model_name=self.service.settings.RERANKER_MODEL,
                     device=self.service.settings.device,
                     top_n=self.service.settings.RERANKER_TOP_N,
-                ).warmup()
+                )
+                if not reranker.warmup():
+                    errors.append("reranker: model unavailable (see logs)")
             except Exception as exc:  # noqa: BLE001
-                print(f"[warmup] reranker warmup failed: {exc}", flush=True)
+                message = f"reranker: {type(exc).__name__}: {exc}"
+                print(f"[warmup] {message}", flush=True)
+                errors.append(message)
+        self.warmed.emit("; ".join(errors))
 
 
 class FfmpegDownloadWorker(QThread):

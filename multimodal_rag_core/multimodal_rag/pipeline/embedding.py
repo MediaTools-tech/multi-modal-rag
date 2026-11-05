@@ -11,6 +11,7 @@ from multimodal_rag.config import (
     is_embeddinggemma_spec,
     parse_embeddinggemma_spec,
 )
+from multimodal_rag.utils.hf_models import is_local_model_path, model_is_cached
 from multimodal_rag.utils.rate_limit import RateLimiter
 from multimodal_rag.utils.token_tracker import TokenTracker
 
@@ -71,10 +72,11 @@ def _gemma_download_hint(model_name: str, variant: str) -> str:
         f"it downloads once from HuggingFace on first use and is then cached.\n"
         f"To get it:\n"
         f"  1. Accept the license at https://huggingface.co/{EMBEDDINGGEMMA_MODEL_ID}\n"
-        f"  2. pip install -U \"sentence-transformers>={GEMMA2_MIN_ST_VERSION}\" transformers huggingface_hub\n"
-        f"  3. huggingface-cli login   (needed: gated repo)\n"
+        f"  2. pip install -U \"sentence-transformers>={GEMMA2_MIN_ST_VERSION}\" "
+        f"transformers huggingface_hub\n"
+        f"  3. hf auth login   (needed: gated repo)\n"
         f"  4. Pre-download (or just restart the app with internet — it auto-downloads):\n"
-        f"     huggingface-cli download {EMBEDDINGGEMMA_MODEL_ID}\n"
+        f"     hf download {EMBEDDINGGEMMA_MODEL_ID}\n"
         f"Cache: $HF_HOME (Docker: /data/hf_cache, persisted on the /data volume) "
         f"or ~/.cache/huggingface.\n"
         f"Tip: pick a smaller variant (text-only 270M) or a 256/128 MRL dimension "
@@ -90,9 +92,9 @@ def _generic_download_hint(model_name: str) -> str:
         f"HuggingFace on first use.\n"
         f"Check the model id spelling and internet, then pre-download:\n"
         f"  pip install -U sentence-transformers huggingface_hub\n"
-        f"  huggingface-cli download {model_name}\n"
+        f"  hf download {model_name}\n"
         f"(Gated repos additionally need: accept the license on its HF page + "
-        f"huggingface-cli login.)"
+        f"hf auth login.)"
     )
 
 
@@ -108,7 +110,7 @@ class EmbeddingEngine(ABC):
         # (e.g. Google text embeddings); documents use RETRIEVAL_DOCUMENT.
         return self.embed_texts([text], task_type="RETRIEVAL_QUERY")[0]
 
-    def warmup(self) -> None:
+    def warmup(self) -> None:  # noqa: B027 - intentional no-op for API engines
         """Pre-load the model so the first real query is fast.
 
         Default: no-op (API engines have nothing to warm). Local engines
@@ -212,6 +214,7 @@ class LocalEmbeddingEngine(EmbeddingEngine):
             # the EMBEDDING_MODEL_NOT_CACHED download hint.
             try:
                 from importlib.metadata import version
+
                 from packaging.version import Version
             except Exception:
                 version = None  # type: ignore[assignment]
@@ -268,9 +271,15 @@ class LocalEmbeddingEngine(EmbeddingEngine):
                     f"({_type_name(exc)}: {exc})"
                 ) from exc
             load_kwargs = self._load_kwargs()
+            base_model = self._base_model_id()
+            if model_is_cached(base_model) and not is_local_model_path(base_model):
+                # Cached weights are the index's vector space. Never ask the
+                # Hub whether the author changed them on a later startup.
+                load_kwargs["local_files_only"] = True
+                logger.info("loading cached embedding model offline: %s", base_model)
             try:
                 self._model = SentenceTransformer(
-                    self._base_model_id(), device=self.settings.device, **load_kwargs
+                    base_model, device=self.settings.device, **load_kwargs
                 )
             except Exception as exc:
                 if is_embeddinggemma_spec(self.model_name):
@@ -320,7 +329,9 @@ class LocalEmbeddingEngine(EmbeddingEngine):
         return [list(map(float, vector)) for vector in embeddings]
 
 
-def get_embedding_engine(settings: Settings, tracker: TokenTracker | None = None) -> EmbeddingEngine:
+def get_embedding_engine(
+    settings: Settings, tracker: TokenTracker | None = None
+) -> EmbeddingEngine:
     role = settings.embedding_role
     if role.provider == "GOOGLE":
         if not role.api_key:

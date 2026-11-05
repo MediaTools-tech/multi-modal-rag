@@ -34,6 +34,10 @@ class MainWindow(QMainWindow):
         self._result_seq = 0
         self._timer: QTimer | None = None
         self._stale_ids: set[int] = set()
+        self._init_worker: InitWorker | None = None
+        self._warmup_worker: WarmupWorker | None = None
+        self._search_worker: SearchWorker | None = None
+        self._models_warmed = False
 
         self.setWindowTitle("Multi-Engine Hybrid RAG")
         self.resize(1200, 760)
@@ -80,6 +84,7 @@ class MainWindow(QMainWindow):
         self.ingest_panel.add_files.connect(self._on_add_files)
         self.ingest_panel.open_inbox.connect(self._on_open_inbox)
         self.ingest_panel.refresh.connect(self._on_refresh)
+        self.ingest_panel.reindex_missing.connect(self._on_reindex_missing)
         self.ingest_panel.file_selected.connect(self._on_file_selected)
         self.ingest_panel.remove_file.connect(self._on_remove_file)
 
@@ -89,6 +94,8 @@ class MainWindow(QMainWindow):
         )
 
     def _start_backend(self) -> None:
+        self._models_warmed = False
+        self._warmup_worker = None
         self.statusBar().showMessage("Initializing backend...")
         self.chat_panel.set_backend_state(
             False, "Waiting for the database and index to load..."
@@ -122,10 +129,18 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(2000)
-        # Pre-load local models in the background so the first query does not
-        # pay checkpoint load + kernel/threadpool warmup synchronously.
-        self._warmup_worker = WarmupWorker(self.service)
-        self._warmup_worker.start()
+        sync = self.service.engine_sync or {}
+        if sync.get("copied"):
+            self.chat_panel.add_assistant_message(
+                f"Copied {sync['copied']} vector record(s) from {sync['from']} "
+                f"to {sync['to']} after the DB engine switch."
+            )
+        if self.service.engine_sync_error:
+            self.chat_panel.add_assistant_message(
+                "Could not sync the previous DB engine automatically: "
+                f"{self.service.engine_sync_error}\n"
+                "Use Reindex for any rows marked processed (not in index)."
+            )
         if not self.service.embedder_ready:
             init_error = getattr(self.service, "init_error", None)
             if init_error and (
@@ -147,16 +162,42 @@ class MainWindow(QMainWindow):
                 "Backend is up, but embeddings are not configured. Open Settings, set "
                 "GOOGLE_API_KEY (or EMBEDDING_PROVIDER=LOCAL), then restart."
             )
-        else:
-            self.chat_panel.set_backend_state(True)
-            if not getattr(self, "_greeted", False):
-                self._greeted = True
-                self.chat_panel.add_assistant_message(
-                    "Ready. Ask a question about your files, or add a files/folder "
-                    "on the left to index one."
-                )
+            self._check_index_fingerprint()
+            self._refresh(reconcile=True)
+            return
+        # Keep querying disabled until both models are loaded and warmed up.
+        self.chat_panel.set_backend_state(
+            False, "Loading and warming up local models..."
+        )
+        self._warmup_worker = WarmupWorker(self.service)
+        self._warmup_worker.warmed.connect(self._on_warmup_done)
+        self._warmup_worker.start()
         self._check_index_fingerprint()
         self._refresh(reconcile=True)
+
+    @Slot(str)
+    def _on_warmup_done(self, error: str) -> None:
+        if not self.service.embedder_ready:
+            return
+        if error:
+            self._models_warmed = False
+            self.statusBar().showMessage("Model warmup failed")
+            self.chat_panel.set_backend_state(
+                False, "Model warmup failed — search is disabled."
+            )
+            self.chat_panel.add_assistant_message(
+                "Search is disabled because model warmup failed:\n"
+                f"{error}\n\nFix the embedding/reranker setup, then restart."
+            )
+            return
+        self._models_warmed = True
+        self.chat_panel.set_backend_state(True)
+        if not getattr(self, "_greeted", False):
+            self._greeted = True
+            self.chat_panel.add_assistant_message(
+                "Ready. Ask a question about your files, or add a files/folder "
+                "on the left to index one."
+            )
 
     def _on_embedding_model_blocked(self, error: str) -> None:
         """Local embedding checkpoint missing: show download steps, stay open.
@@ -272,8 +313,11 @@ class MainWindow(QMainWindow):
             self.service.restart_worker()
         self.preview_panel.clear()
         self._refresh()
-        # The backend stayed up, so querying can be re-enabled immediately.
-        self.chat_panel.set_backend_state(self.service.embedder_ready)
+        # The backend stayed up, but only re-enable queries if the models were
+        # already warmed successfully.
+        self.chat_panel.set_backend_state(
+            self.service.embedder_ready and self._models_warmed
+        )
         self.chat_panel.add_assistant_message(
             f"Index reset: {result['vectors']} vector record(s) and "
             f"{result['queue']} queue entr(ies) deleted. Re-ingest your files to start fresh."
@@ -316,17 +360,25 @@ class MainWindow(QMainWindow):
             logger.warning("refresh failed: %s", exc)
 
     def _on_refresh(self) -> None:
-        # Sync the list with the actual index: drop entries whose vectors are gone.
+        # Re-check the queue against the current index without deleting anything.
+        self._refresh(reconcile=True)
+
+    def _on_reindex_missing(self) -> None:
         self._refresh(reconcile=True)
         stale = set(self._stale_ids)
-        if stale:
-            removed = self.service.remove_missing(stale)
-            self._stale_ids = set()
-            self._refresh(reconcile=True)
+        if not stale:
             self.chat_panel.add_assistant_message(
-                f"Removed {removed} queue entr(ies) missing from the index "
-                "(vectors were deleted elsewhere; source files kept)."
+                "No processed files are missing from the current index."
             )
+            return
+        requeued = self.service.reindex_missing(stale)
+        self._stale_ids = set()
+        self._refresh(reconcile=True)
+        self.chat_panel.add_assistant_message(
+            f"Requeued {requeued} file(s) missing from the current index. "
+            "Indexing starts in the background; this is expected after switching "
+            "DB engines without mrag-db-copy."
+        )
 
     def _update_session_usage(self) -> None:
         from multimodal_rag.utils.token_tracker import TokenTracker
@@ -385,17 +437,31 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.settings.INBOX_DIR))
 
     def _on_query(self, query: str) -> None:
+        if self._search_worker is not None:
+            return
+        if not self._models_warmed or not self.service.embedder_ready:
+            return
         self.chat_panel.show_loading()
+        self.chat_panel.set_busy(True)
         self._last_with_answer = self.chat_panel.answer_enabled()
-        self._search_worker = SearchWorker(
+        worker = SearchWorker(
             self.service,
             query,
             self.chat_panel.active_mode(),
             self.settings.SEARCH_TOP_K,
             with_answer=self.chat_panel.answer_enabled(),
         )
-        self._search_worker.completed.connect(self._on_search_done)
-        self._search_worker.start()
+        self._search_worker = worker
+        worker.completed.connect(self._on_search_done)
+        worker.finished.connect(self._on_search_finished)
+        worker.start()
+
+    @Slot()
+    def _on_search_finished(self) -> None:
+        worker = self.sender()
+        if worker is self._search_worker:
+            self._search_worker = None
+        self.chat_panel.set_busy(False)
 
     @Slot(object, object, str, str)
     def _on_search_done(self, results, groups, answer: str, error: str) -> None:
@@ -410,6 +476,7 @@ class MainWindow(QMainWindow):
         self._update_session_usage()
         if error:
             self.chat_panel.add_assistant_message(f"Search error: {error}")
+            self.preview_panel.clear("Search failed; no source preview.")
             return
         # Keep every previous answer's cards resolvable. Reusing rank keys
         # (0, 1, 2, ...) and clearing this map made clicks on older answers
@@ -454,6 +521,20 @@ class MainWindow(QMainWindow):
         # visual list matches the reading order. Uncited cards keep rank order
         # after a divider. Deduplicate preserving first-mention order.
         cited = list(dict.fromkeys(int(n) for n in re.findall(r"\[(\d+)\]", answer or "")))
+        # Keep the preview pane in sync with the answer the user just received.
+        # The UI puts cited cards first (in answer mention order), so preview the
+        # same top card; with no citations, fall back to the best-ranked result.
+        top_result = None
+        for rank in cited:
+            if 1 <= rank <= len(results):
+                top_result = results[rank - 1]
+                break
+        if top_result is None and results:
+            top_result = results[0]
+        if top_result is not None:
+            self.preview_panel.show_result(top_result)
+        else:
+            self.preview_panel.clear("No source matched this query.")
         self.chat_panel.add_assistant_message(text, cards, cited)
 
     def _on_result_clicked(self, key: str) -> None:

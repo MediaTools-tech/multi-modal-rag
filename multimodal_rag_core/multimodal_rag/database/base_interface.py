@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from typing import Any
 
 from multimodal_rag.core.models import SearchResult, VectorRecord
@@ -45,6 +46,13 @@ class DocumentRepository(ABC):
         empty mapping and local correction becomes a no-op.
         """
         return {}
+
+    def iter_records(self, batch_size: int = 500) -> Iterator[list[VectorRecord]]:
+        """Yield all stored records in batches for cross-engine migration.
+
+        Optional capability: backends that cannot export records yield nothing.
+        """
+        return iter(())
 
     @abstractmethod
     def get_by_file_hash(self, file_hash: str) -> list[VectorRecord]:

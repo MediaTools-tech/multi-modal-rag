@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import os
 import shutil
@@ -128,7 +129,76 @@ def _path_link(path_str: str, link_color: str | None = None) -> str:
 
 def _image_preview_html(path: Path, width: int = 280) -> str:
     url = QUrl.fromLocalFile(str(path)).toString()
-    return f"<img src='{html.escape(url)}' width='{width}' />"
+    escaped = html.escape(url, quote=True)
+    return (
+        f"<a href=\"{escaped}\" title=\"Open image in the default viewer\" "
+        "style=\"text-decoration:none;\">"
+        f"<img src='{escaped}' width='{width}' />"
+        "</a>"
+    )
+
+
+def _video_frame_file(video: Path, timestamp: float | None) -> Path | None:
+    """Cached JPEG for a video frame, or None when extraction is unavailable."""
+    try:
+        from multimodal_rag.pipeline.video_extractor import extract_frame_at
+    except Exception:  # noqa: BLE001
+        return None
+    settings = get_settings()
+    try:
+        stat = video.stat()
+    except OSError:
+        return None
+    target = max(0.0, float(timestamp or 0.0))
+    key = f"{video.resolve()}|{stat.st_mtime_ns}|{target:.3f}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
+    cache_dir = Path(settings.DATA_DIR) / "video_frame_cache"
+    target_file = cache_dir / f"{digest}.jpg"
+    try:
+        if target_file.is_file() and target_file.stat().st_size:
+            return target_file
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        jpeg = extract_frame_at(video, target, settings)
+        if not jpeg:
+            return None
+        target_file.write_bytes(jpeg)
+        return target_file
+    except OSError:
+        return None
+
+
+def _video_preview_html(
+    video: Path,
+    timestamp: float | None,
+    link_color: str,
+    muted: str,
+    width: int = 280,
+) -> str:
+    """Clickable video frame; the anchor opens the video via ``_on_anchor``."""
+    url = QUrl.fromLocalFile(str(video)).toString()
+    escaped = html.escape(url, quote=True)
+    frame = _video_frame_file(video, timestamp)
+    if frame is None:
+        return (
+            f"<p><a href=\"{escaped}\" style=\"color:{link_color};\">Open video</a> "
+            f"<span style='color:{muted}'>(frame preview unavailable)</span></p>"
+        )
+    frame_url = QUrl.fromLocalFile(str(frame)).toString()
+    frame_escaped = html.escape(frame_url, quote=True)
+    label = (
+        f"Click to play from {timestamp:.0f}s"
+        if timestamp is not None
+        else "Click to play video"
+    )
+    if timestamp is not None and find_vlc() is None:
+        label = f"Click to play from start (install VLC to seek to {timestamp:.0f}s)"
+    return (
+        f"<a href=\"{escaped}\" title=\"{html.escape(label, quote=True)}\" "
+        "style=\"text-decoration:none;\">"
+        f"<img src='{frame_escaped}' width='{width}' />"
+        "</a>"
+        f"<p style='color:{muted};font-size:11px'>{html.escape(label)}</p>"
+    )
 
 
 def find_vlc() -> str | None:
@@ -216,6 +286,13 @@ class PreviewPanel(QWidget):
                 "(Inbox files move through processing/processed folders after indexing.)",
             )
             return
+        if url.isLocalFile() and Path(path_str).suffix.lower() in _VIDEO_SUFFIXES:
+            video_path = Path(path_str)
+            if self._play_path is not None and self._play_path.resolve() == video_path.resolve():
+                self._on_play()
+            else:
+                self._open_video(video_path, None)
+            return
         QDesktopServices.openUrl(url)
 
     def set_last_usage(self, text: str) -> None:
@@ -248,6 +325,20 @@ class PreviewPanel(QWidget):
             else:
                 body += (
                     f"<p style='color:{self.palette.text_muted}'>Image file not found "
+                    "at the indexed path (inbox files move after processing).</p>"
+                )
+        if record.file_type == "video" or image_path.suffix.lower() in _VIDEO_SUFFIXES:
+            if image_path.is_file():
+                preview = _video_preview_html(
+                    image_path,
+                    record.timestamp_start,
+                    self.palette.link,
+                    self.palette.text_muted,
+                )
+                body += f"<p>{preview}</p>"
+            else:
+                body += (
+                    f"<p style='color:{self.palette.text_muted}'>Video file not found "
                     "at the indexed path (inbox files move after processing).</p>"
                 )
         content = record.content or ""
@@ -310,12 +401,15 @@ class PreviewPanel(QWidget):
             passages, garbled = _indexed_passages_html(
                 chunks, "Video transcript / keyframe captions", self.palette.text_muted
             )
+            preview = _video_preview_html(
+                path, None, self.palette.link, self.palette.text_muted
+            )
             self.view.setHtml(
                 header
+                + f"<p>{preview}</p>"
                 + f"<p style='color:{self.palette.text_muted}'>Video file — "
-                "use the Play button below to open it from the start, or "
-                "ask a question in chat, then click a timestamped source link "
-                "to preview it here.</p>"
+                "click the frame to play from the start, or ask a question in "
+                "chat and click a timestamped source link to preview that moment.</p>"
                 + (passages or "")
                 + (_garbled_hint(name, self.palette.text_muted) if garbled else "")
             )
@@ -385,10 +479,10 @@ class PreviewPanel(QWidget):
             )
         self._hide_play()
 
-    def clear(self) -> None:
+    def clear(self, message: str | None = None) -> None:
+        text = message or "Select a source to preview it here."
         self.view.setHtml(
-            f"<p style='color:{self.palette.text_muted}'>"
-            "Select a source to preview it here.</p>"
+            f"<p style='color:{self.palette.text_muted}'>{html.escape(text)}</p>"
         )
         self._hide_play()
 
@@ -422,7 +516,9 @@ class PreviewPanel(QWidget):
         self.play_btn.setVisible(True)
 
     def _on_play(self) -> None:
-        path, timestamp = self._play_path, self._play_ts
+        self._open_video(self._play_path, self._play_ts)
+
+    def _open_video(self, path: Path | None, timestamp: float | None) -> None:
         if path is None or not path.is_file():
             QMessageBox.warning(
                 self, "Cannot play", f"The video file no longer exists at:\n{path}"

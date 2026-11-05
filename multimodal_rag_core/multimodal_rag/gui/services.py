@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from multimodal_rag.config import IngestionMode, SearchMode, Settings, get_settings
+from multimodal_rag.config import DBEngine, IngestionMode, SearchMode, Settings, get_settings
 from multimodal_rag.ingestion.queue import IngestQueue
 from multimodal_rag.ingestion.state import (
     INDEX_FINGERPRINT_KEYS,
@@ -45,8 +45,13 @@ class BackendService:
         # build_context swallows engine-construction errors (lazy weights), so
         # capture the cheap eager checks here for the GUI to display.
         self.init_error: str | None = None
+        # Result of the automatic previous-engine -> current-engine sync.
+        self.engine_sync: dict = {}
+        self.engine_sync_error: str | None = None
 
     def initialize(self) -> None:
+        self.engine_sync = {}
+        self.engine_sync_error = None
         self.settings.ensure_data_dirs()
         # Share one tracker so session totals include embeddings, VLM, summaries
         # and answers (build_context would otherwise use its own throwaway one).
@@ -62,6 +67,7 @@ class BackendService:
                 self.init_error = None
         self.store = StateStore(self.settings.STATE_DB_PATH)
         self.store.reset_stale()
+        self._sync_previous_engine()
         self.queue = IngestQueue(
             self.store,
             self.settings.MAX_INGEST_RETRIES,
@@ -90,6 +96,104 @@ class BackendService:
                 on_delete=self._on_source_deleted,
             )
             self.watcher.start()
+
+    def _previous_engine(self) -> str | None:
+        """Engine used at the previous startup, with a legacy fingerprint fallback."""
+        if self.store is None:
+            return None
+        value = self.store.get_meta("last_active_engine")
+        if value:
+            return value
+        import json
+
+        raw = self.store.get_meta("index_fingerprint")
+        if not raw:
+            return None
+        try:
+            stored = json.loads(raw)
+        except ValueError:
+            return None
+        legacy = stored.get("ACTIVE_DB_ENGINE")
+        return str(legacy) if legacy else None
+
+    def _sync_previous_engine(self) -> None:
+        """Copy files ingested under the previous engine into the active one.
+
+        mrag-db-copy remains available for explicit/full migrations; this keeps
+        the common GUI engine toggle seamless when state.db is shared. Only
+        files still marked processed are copied, so deleted rows are not
+        resurrected.
+        """
+        if self.context is None or self.context.repository is None or self.store is None:
+            return
+        current_engine = self.settings.ACTIVE_DB_ENGINE
+        if current_engine is None:
+            return
+        previous_value = self._previous_engine()
+        if not previous_value:
+            self.store.set_meta("last_active_engine", current_engine.value)
+            return
+        if previous_value == current_engine.value:
+            return
+        try:
+            previous_engine = DBEngine(previous_value)
+        except ValueError:
+            logger.warning("ignoring unknown previous DB engine %r", previous_value)
+            self.store.set_meta("last_active_engine", current_engine.value)
+            return
+
+        processed = self.store.list_by_status("processed")
+        allowed_hashes = {record.sha256 for record in processed if record.sha256}
+        allowed_paths = {record.path for record in processed if record.path}
+        try:
+            target_hashes = self.context.repository.indexed_file_hashes()
+            target_paths = self.context.repository.indexed_paths()
+        except Exception as exc:  # noqa: BLE001
+            self.engine_sync_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("engine-switch coverage check failed: %s", exc)
+            return
+        missing = [
+            record
+            for record in processed
+            if not (record.sha256 and record.sha256 in target_hashes)
+            and not (record.path and record.path in target_paths)
+        ]
+        if not missing:
+            self.store.set_meta("last_active_engine", current_engine.value)
+            return
+        try:
+            from multimodal_rag.database.migrate import copy_missing_between
+
+            copied = copy_missing_between(
+                self.settings,
+                previous_engine,
+                current_engine,
+                self.context.repository,
+                allowed_hashes=allowed_hashes,
+                allowed_paths=allowed_paths,
+            )
+            self.context.repository.reindex()
+        except Exception as exc:  # noqa: BLE001
+            self.engine_sync_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "automatic %s -> %s sync failed: %s",
+                previous_engine.value,
+                current_engine.value,
+                exc,
+            )
+            return
+        self.engine_sync = {
+            "from": previous_engine.value,
+            "to": current_engine.value,
+            "copied": copied,
+        }
+        logger.info(
+            "automatic engine sync %s -> %s: %d record(s) copied",
+            previous_engine.value,
+            current_engine.value,
+            copied,
+        )
+        self.store.set_meta("last_active_engine", current_engine.value)
 
     def _on_source_deleted(self, path) -> None:
         """Drop the queue row and vectors when a tracked inbox file is deleted."""
@@ -339,14 +443,14 @@ class BackendService:
             stale.add(record.id)
         return stale
 
-    def remove_missing(self, record_ids: set[int]) -> int:
-        """Delete queue rows whose vectors are already gone. Source files kept."""
+    def reindex_missing(self, record_ids: set[int]) -> int:
+        """Requeue processed rows whose vectors are gone from the current index."""
         if self.store is None:
             return 0
-        removed = 0
+        requeued = 0
         for record_id in record_ids:
-            removed += self.store.delete(record_id)
-        return removed
+            requeued += self.store.retry(record_id)
+        return requeued
 
     @staticmethod
     def _fingerprint_value(settings: Settings, key: str) -> str:
@@ -391,9 +495,10 @@ class BackendService:
             stored = json.loads(raw)
         except ValueError:
             stored = {}
-        if set(stored) < set(INDEX_FINGERPRINT_KEYS):
-            # Stamp from an older version: compare the shared subset, and if it
-            # matches, silently migrate to the full stamp instead of nagging.
+        if set(INDEX_FINGERPRINT_KEYS) - set(stored):
+            # Stamp from an older version (missing keys, possibly with extras):
+            # compare the shared subset and, if it matches, silently migrate to
+            # the full stamp instead of nagging.
             shared_diffs = [
                 f"{key}: index has {stored.get(key)!r}, config now {current[key]!r}"
                 for key in INDEX_FINGERPRINT_KEYS

@@ -31,7 +31,10 @@ Without AVX2, `pylance` aborts with `Illegal instruction` (a native crash, not a
   `GOOGLE_API_KEY` works as a fallback). Users with capable hardware can run **everything
   locally** (Ollama + local embeddings) with no cloud key at all.
 - **Internet on first run.** Local embeddings, the re-ranker, and Docling/Whisper models are
-  downloaded from the Hugging Face Hub the first time they are used.
+  downloaded from the Hugging Face Hub the first time they are used. Once cached, they load
+  with `local_files_only=True`, so startup does not check the Hub for changed weights. For
+  gated/private models set `HF_TOKEN` in the process environment or run `hf auth login`;
+  public models need neither.
 - **`ffmpeg` is optional** — needed only to extract the audio track from **video** files. The
   desktop app offers to download a static ffmpeg on first launch; otherwise install it on
   `PATH`. Documents and audio-only files work without it.
@@ -59,7 +62,7 @@ Without AVX2, `pylance` aborts with `Illegal instruction` (a native crash, not a
         ├── query.py          # `mrag-query` CLI (retrieval + cited answer)
         ├── core/             # VectorRecord, SearchResult, FileSearchGroup
         ├── search/           # lexical (BM25), hybrid (RRF), reranker
-        ├── database/         # repository ABC + postgres / lancedb providers
+        ├── database/         # repository ABC, postgres/lancedb providers, `mrag-db-copy`
         ├── pipeline/         # parsing, embeddings, media, registry
         ├── ingestion/        # durable SQLite queue, watcher, worker, `mrag-ingest`
         ├── gui/              # PySide6 desktop app (`mrag-gui`)
@@ -137,7 +140,7 @@ Copy `.env.example` to `.env`. Key settings:
 | `LLM_*` | text purpose: provider, model, `LLM_API_KEY` |
 | `SUMMARY_*` | local semantic LexRank (default) or LLM summaries; word/char budgets plus an automatic embedding-token-window clamp |
 | `SEARCH_MODE` | `auto` / `chunk` / `summary` / `hybrid` |
-| `TYPO_CORRECTION` | `LOCAL` (default, free edit-distance lookup), `LLM` (one text-LLM query rewrite per search), or `OFF` |
+| `TYPO_CORRECTION` | `LOCAL` (default, free SymSpell lookup against indexed words), `LLM` (one text-LLM query rewrite per search), or `OFF` |
 | `MRAG_HOME` | app root for `.env`, `data/`, `state.db` (default `~/.multimodal_rag`, or cwd when a `.env` is present) |
 
 Providers are configured **by purpose** (embeddings / vlm / llm), each with its own provider, model
@@ -171,7 +174,22 @@ mrag-ingest status --failed     # queue stats / failures
 mrag-ingest retry all           # requeue failures
 mrag-ingest reset-stale         # requeue items stuck in "processing"
 mrag-doctor                     # print resolved provider/key/role mapping
+
+# copy the current index to the other DB engine without re-parsing/re-embedding
+mrag-db-copy                    # current engine -> the other engine
+mrag-db-copy --from LANCEDB --to POSTGRES --replace
 ```
+
+`mrag-db-copy` preserves stored vectors, chunks, summaries, metadata and timestamps. The target
+must use the same embedding dimension; add `--replace` when the target already contains records.
+It also copies the engine-specific `state.db` queue/status rows when applicable (`--no-state`
+skips that). Stop the GUI/ingestion worker before copying, then set `ACTIVE_DB_ENGINE` to the
+target and restart.
+
+Switching `ACTIVE_DB_ENGINE` in the GUI/`.env` is handled automatically when `state.db` is shared:
+on startup the app copies only the processed files missing from the current engine (vectors are
+reused, no re-parsing/re-embedding). If that sync fails, rows show `processed (not in index)` and
+the GUI's **Reindex** button requeues them. `mrag-db-copy` remains the explicit full-copy tool.
 
 Query (retrieval + optional cited LLM answer):
 
@@ -192,9 +210,9 @@ mrag-query -i                    # interactive REPL
 | `chunk` | passage-level chunk vectors only (pure semantic search) | no | fastest; literal passage lookup |
 
 `TYPO_CORRECTION=LOCAL` (default) compares unknown query words against the indexed vocabulary
-and replaces only close matches, with no API call. `TYPO_CORRECTION=LLM` asks the configured text
-LLM to rewrite the query once per search, falling back to local correction if no LLM is available.
-Both options are exposed in the GUI Settings screen; `OFF` disables correction.
+using SymSpell and replaces only close matches, with no API call. `TYPO_CORRECTION=LLM` asks the
+configured text LLM to rewrite the query once per search, falling back to local correction if no
+LLM is available. Both options are exposed in the GUI Settings screen; `OFF` disables correction.
 
 Desktop GUI (native, Windows/Linux/macOS; not in Docker). Qt Essentials is already included
 in `requirements.txt`, so after Option B you can just run it:
@@ -208,6 +226,9 @@ pip install -e ".[gui,build]" && pyinstaller mrag-gui.spec
 
 > Automatic ingestion requires `mrag-ingest run` (or the Docker `app` service) to be running.
 > Files must be dropped in `data/inbox/`; with no loop active, use `scan`/`add`.
+>
+> The chat input stays disabled until the embedding model and configured reranker have loaded
+> and warmed up, and while a search is running, so overlapping queries cannot start.
 
 Pipeline handlers are wired in `multimodal_rag/pipeline/registry.py`
 (`document`, `audio`, `video`).

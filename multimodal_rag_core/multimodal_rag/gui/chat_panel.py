@@ -72,6 +72,10 @@ class ChatPanel(QWidget):
         self._loading: QWidget | None = None
         self._active_query_row: QWidget | None = None
         self._scroll_anchor: QWidget | None = None
+        self._backend_ready = False
+        self._backend_reason = "Waiting for the database and index to load..."
+        self._busy = False
+        self._busy_reason = "Searching... please wait."
         self.palette = get_palette(get_settings().GUI_THEME.value)
         self._build()
 
@@ -159,20 +163,38 @@ class ChatPanel(QWidget):
         Prevents the misleading "embedding engine not configured" error when a
         question is sent while the database/index is still loading at startup.
         """
-        self.input.setEnabled(ready)
-        self.send_btn.setEnabled(ready)
-        if ready:
+        self._backend_ready = ready
+        self._backend_reason = reason or "Waiting for the database and index to load..."
+        self._update_query_enabled()
+
+    def set_busy(self, busy: bool, reason: str = "") -> None:
+        """Disable input while one search runs, preventing overlapping workers."""
+        self._busy = busy
+        if busy:
+            self._busy_reason = reason or "Searching... please wait."
+        self._update_query_enabled()
+
+    def _update_query_enabled(self) -> None:
+        enabled = self._backend_ready and not self._busy
+        self.input.setEnabled(enabled)
+        self.send_btn.setEnabled(enabled)
+        if self._busy:
+            hint = self._busy_reason
+        elif not self._backend_ready:
+            hint = self._backend_reason
+        else:
+            hint = ""
+        if hint:
+            self.input.setPlaceholderText(hint)
+            self.input.setToolTip(hint)
+        else:
             self.input.setPlaceholderText(
                 "Ask a question about your files... (Enter to send)"
             )
             self.input.setToolTip("")
-        else:
-            hint = reason or "Waiting for the database and index to load..."
-            self.input.setPlaceholderText(hint)
-            self.input.setToolTip(hint)
 
     def _on_send(self) -> None:
-        if not self.input.isEnabled():
+        if not self.input.isEnabled() or self._busy:
             return
         text = self.input.text().strip()
         if not text:

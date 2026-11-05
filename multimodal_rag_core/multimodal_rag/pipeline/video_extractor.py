@@ -103,6 +103,44 @@ def extract_keyframes(path: Path, settings: Settings) -> list[Frame]:
     return frames
 
 
+def extract_frame_at(
+    path: Path,
+    timestamp: float | None,
+    settings: Settings,
+) -> bytes | None:
+    """JPEG for the frame nearest ``timestamp`` (0 when unset), or None.
+
+    GUI previews use this lazily; importing/initialising OpenCV stays optional
+    so headless installs without the video extra still work.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return None
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        logger.warning("Could not open video for preview: %s", path)
+        return None
+    target = max(0.0, float(timestamp or 0.0))
+    try:
+        capture.set(cv2.CAP_PROP_POS_MSEC, target * 1000.0)
+        ok, frame = capture.read()
+        if not ok and target > 0:
+            fps = capture.get(cv2.CAP_PROP_FPS) or 25.0
+            capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(target * fps)))
+            ok, frame = capture.read()
+        if not ok:
+            logger.warning("Could not read video frame at %.2fs from %s", target, path)
+            return None
+        return _encode(frame, settings, cv2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Video frame preview failed for %s: %s", path, exc)
+        return None
+    finally:
+        capture.release()
+
+
 def extract_audio_track(path: Path, settings: Settings) -> Path | None:
     ffmpeg = find_ffmpeg()
     if ffmpeg is None:

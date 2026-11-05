@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 import psycopg
@@ -401,6 +402,23 @@ class PostgresProvider(DocumentRepository):
     def reindex(self) -> None:
         # pgvector updates HNSW incrementally on insert; nothing to rebuild.
         return None
+
+    def iter_records(self, batch_size: int = 500) -> Iterator[list[VectorRecord]]:
+        conn = self._connect()
+        try:
+            with conn.cursor(name="mrag_db_copy") as cur:
+                cur.itersize = batch_size
+                cur.execute(f"SELECT * FROM {self.table};")
+                batch: list[VectorRecord] = []
+                for row in cur:
+                    batch.append(self._row_to_record(dict(row)))
+                    if len(batch) >= batch_size:
+                        yield batch
+                        batch = []
+                if batch:
+                    yield batch
+        finally:
+            conn.close()
 
     def _fetch_records(self, where_sql: str, params: tuple[Any, ...]) -> list[VectorRecord]:
         query = f"SELECT * FROM {self.table} {where_sql};"

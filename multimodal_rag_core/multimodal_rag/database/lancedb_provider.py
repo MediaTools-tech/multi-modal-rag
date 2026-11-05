@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -315,6 +316,17 @@ class LanceDBProvider(DocumentRepository):
             counts.update(tokenize(str(text)))
         self._vocab_cache = dict(counts.most_common(max_terms))
         return self._vocab_cache
+
+    def iter_records(self, batch_size: int = 500) -> Iterator[list[VectorRecord]]:
+        frame = self._table.to_pandas()
+        batch: list[VectorRecord] = []
+        for _, row in frame.iterrows():
+            batch.append(self._row_to_record(row.to_dict()))
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
     def get_by_file_hash(self, file_hash: str) -> list[VectorRecord]:
         frame = self._table.to_pandas()

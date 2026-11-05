@@ -6,6 +6,7 @@ import threading
 from typing import Any
 
 from multimodal_rag.core.models import SearchResult
+from multimodal_rag.utils.hf_models import is_local_model_path, model_is_cached
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,15 @@ class CrossEncoderReranker:
                 logger.warning("Reranker unavailable (sentence-transformers missing): %s", exc)
                 return None
             try:
-                model = CrossEncoder(self.model_name, device=self.device)
+                load_kwargs: dict[str, Any] = {"device": self.device}
+                if model_is_cached(self.model_name) and not is_local_model_path(
+                    self.model_name
+                ):
+                    load_kwargs["local_files_only"] = True
+                    logger.info(
+                        "loading cached reranker offline: %s", self.model_name
+                    )
+                model = CrossEncoder(self.model_name, **load_kwargs)
                 _MODEL_CACHE[cache_key] = model
                 self._model = model
                 return model
@@ -52,20 +61,23 @@ class CrossEncoderReranker:
                 logger.warning("Failed to load reranker %s: %s", self.model_name, exc)
                 return None
 
-    def warmup(self) -> None:
+    def warmup(self) -> bool:
         """Load the cross-encoder and run one throwaway pair inference.
 
         Moves checkpoint load, tokenizer init and first-pass setup off the
-        first real query. Non-fatal: a failed warmup is only logged.
+        first real query. Returns False when the model is unavailable or the
+        warmup inference fails.
         """
         try:
             model = self._ensure_model()
             if model is None:
-                return
+                return False
             model.predict([("warmup", "warmup")])
             logger.info("reranker warmup complete: %s", self.model_name)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("reranker warmup failed: %s", exc)
+            return False
 
     def rerank(
         self, query: str, candidates: list[SearchResult], top_n: int | None = None
