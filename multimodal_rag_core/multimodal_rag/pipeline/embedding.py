@@ -331,8 +331,10 @@ class LocalEmbeddingEngine(EmbeddingEngine):
 
 def get_embedding_engine(
     settings: Settings, tracker: TokenTracker | None = None
-) -> EmbeddingEngine:
+) -> EmbeddingEngine | None:
     role = settings.embedding_role
+    if role.provider == "NONE":
+        return None
     if role.provider == "GOOGLE":
         if not role.api_key:
             raise RuntimeError(

@@ -218,22 +218,26 @@ def _model_aware_chunk_spans(
     model = settings.EMBEDDING_MODEL
     provider = getattr(settings.EMBEDDING_PROVIDER, "value", settings.EMBEDDING_PROVIDER)
     local = provider == "LOCAL"
-    window = embedding_max_input_tokens(model)
-    safe_budget = chunk_token_budget(model)
+    embedding_enabled = provider != "NONE"
     configured = int(getattr(settings, "DOC_CHUNK_TOKENS", 0) or 0)
-    max_tokens = chunk_token_target(model, configured)
-    if configured > safe_budget:
-        key = (model, configured, safe_budget)
-        if key not in _WARNED_CHUNK_BUDGETS:
-            _WARNED_CHUNK_BUDGETS.add(key)
-            logger.warning(
-                "DOC_CHUNK_TOKENS=%d exceeds the safe budget for %s; using %d "
-                "tokens (model window %d).",
-                configured,
-                model,
-                max_tokens,
-                window,
-            )
+    if embedding_enabled:
+        window = embedding_max_input_tokens(model)
+        safe_budget = chunk_token_budget(model)
+        max_tokens = chunk_token_target(model, configured)
+        if configured > safe_budget:
+            key = (model, configured, safe_budget)
+            if key not in _WARNED_CHUNK_BUDGETS:
+                _WARNED_CHUNK_BUDGETS.add(key)
+                logger.warning(
+                    "DOC_CHUNK_TOKENS=%d exceeds the safe budget for %s; using %d "
+                    "tokens (model window %d).",
+                    configured,
+                    model,
+                    max_tokens,
+                    window,
+                )
+    else:
+        max_tokens = chunk_token_target(model, configured, embedding_enabled=False)
 
     configured_overlap = int(getattr(settings, "DOC_CHUNK_OVERLAP_TOKENS", 0) or 0)
     overlap_tokens = 0

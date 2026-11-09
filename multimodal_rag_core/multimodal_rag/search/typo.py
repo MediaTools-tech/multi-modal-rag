@@ -34,8 +34,10 @@ def correct_query_local(
     Only out-of-vocabulary words are touched. SymSpell's deletion index provides
     fast candidate lookup over the corpus vocabulary; candidates must still be
     within a small Damerau-Levenshtein distance, so names and codes are left
-    alone unless they are genuinely close to an indexed word. If symspellpy is
-    unavailable, the small built-in matcher keeps local correction working.
+    alone unless they are genuinely close to an indexed word. If no spelling
+    candidate exists, a unique longer vocabulary prefix is used so unfinished
+    words such as ``authentica`` can still match. If symspellpy is unavailable,
+    the small built-in matcher keeps local correction working.
     """
     if not query or not vocabulary:
         return query
@@ -60,6 +62,8 @@ def correct_query_local(
             if spell is not None
             else _best_candidate(word, buckets, max_edits)
         )
+        if candidate is None:
+            candidate = _unique_prefix_candidate(word, vocabulary)
         if candidate and candidate != word:
             replacements.append(
                 (match.start(), match.end(), _match_case(original, candidate))
@@ -210,6 +214,34 @@ def _best_candidate(
         if best is None or score < best:
             best = score
     return best[3] if best is not None else None
+
+
+def _unique_prefix_candidate(
+    word: str,
+    vocabulary: Mapping[str, int],
+    min_prefix_length: int = 4,
+) -> str | None:
+    """Complete an unfinished word only when the vocabulary is unambiguous.
+
+    Edit-distance correction does not help when a user types ``authentica``.
+    Requiring exactly one longer vocabulary term that starts with the query
+    keeps this conservative: ambiguous prefixes (``migr``) are left untouched.
+    """
+    if len(word) < min_prefix_length:
+        return None
+    match: str | None = None
+    for candidate in vocabulary:
+        if (
+            candidate == word
+            or not candidate.startswith(word)
+            or not candidate.isalpha()
+            or len(candidate) < len(word) + 2
+        ):
+            continue
+        if match is not None:
+            return None
+        match = candidate
+    return match
 
 
 def _damerau_levenshtein(a: str, b: str, max_distance: int) -> int:

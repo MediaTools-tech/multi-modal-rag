@@ -81,6 +81,7 @@ class VLMProvider(str, Enum):
 class EmbeddingProvider(str, Enum):
     LOCAL = "LOCAL"
     GOOGLE = "GOOGLE"
+    NONE = "NONE"
 
 
 class RerankerProvider(str, Enum):
@@ -111,6 +112,14 @@ class SearchMode(str, Enum):
     SUMMARY = "summary"
     HYBRID = "hybrid"
     AUTO = "auto"
+    KEYWORD = "keyword"
+
+
+class KeywordExpansion(str, Enum):
+    OFF = "OFF"
+    CORPUS = "CORPUS"
+    SYNONYMS = "SYNONYMS"
+    CORPUS_SYNONYMS = "CORPUS+SYNONYMS"
 
 
 class TypoCorrectionMode(str, Enum):
@@ -198,6 +207,7 @@ CHUNK_EMBEDDING_TOKEN_RATIO = 0.9
 
 #: Default chunk target when DOC_CHUNK_TOKENS is 0. Large-window embedders still
 #: get bounded chunks instead of 8k-token passages; explicit values override it.
+#: The same target is used in keyword-only mode, without an embedder-window cap.
 CHUNK_DEFAULT_TOKENS = 450
 
 #: Base HuggingFace id for EmbeddingGemma 2 (single checkpoint, Apache-2.0,
@@ -342,7 +352,7 @@ class Settings(BaseSettings):
 
     SYSTEM_MODE: SystemMode = SystemMode.MULTI_MODAL_RAG
     ACTIVE_DB_ENGINE: DBEngine | None = None
-    # Desktop GUI color scheme (see gui/theme.py). Applied at startup.
+    # Desktop GUI color scheme (see gui/theme.py). Applied live by the GUI.
     GUI_THEME: GuiTheme = GuiTheme.GRAPHITE
 
     # ── Purpose-first roles (single source of truth) ──────────────────────
@@ -424,10 +434,21 @@ class Settings(BaseSettings):
     RERANKER_ALLOW_CPU: bool = True
 
     SEARCH_TOP_K: int = 10
+    # How many retrieved passages are sent to the text LLM for the optional
+    # cited answer. 0 = all retrieved results. Retrieval top-k stays independent.
+    ANSWER_TOP_K: int = 3
     SEARCH_MODE: SearchMode = SearchMode.HYBRID
     # LOCAL = edit-distance correction against indexed vocabulary (default, free).
     # LLM = one text-LLM query rewrite per search; OFF disables correction.
     TYPO_CORRECTION: TypoCorrectionMode = TypoCorrectionMode.LOCAL
+    # Keyword-only mode query expansion. OFF keeps exact terms (best for names,
+    # IDs, and codes). CORPUS uses pseudo-relevance feedback from the top lexical
+    # hits. SYNONYMS uses the bundled WordNet-derived synonym map. CORPUS+SYNONYMS
+    # combines both. Nothing is downloaded at runtime.
+    # When this is not set explicitly, keyword-only/auto-no-embedder searches
+    # default to CORPUS (see _default_keyword_expansion).
+    KEYWORD_EXPANSION: KeywordExpansion = KeywordExpansion.OFF
+    KEYWORD_EXPANSION_TERMS: int = 3
     HYBRID_RRF_K: int = 60
     ENABLE_DOCUMENT_SUMMARIES: bool = True
     SUMMARY_PROVIDER: SummaryProvider = SummaryProvider.LOCAL
@@ -492,15 +513,15 @@ class Settings(BaseSettings):
     # additionally enforces the embedding model's input window.
     DOC_CHUNK_SIZE: int = 800
     DOC_CHUNK_OVERLAP: int = 100
-    # 0 = CHUNK_DEFAULT_TOKENS, capped by window * CHUNK_EMBEDDING_TOKEN_RATIO.
-    # Explicit values are clamped to the same safe cap.
+    # 0 = CHUNK_DEFAULT_TOKENS (450); capped by window * CHUNK_EMBEDDING_TOKEN_RATIO
+    # only when embeddings are enabled. Explicit values are clamped only in that mode.
     DOC_CHUNK_TOKENS: int = 0
     DOC_CHUNK_OVERLAP_TOKENS: int = 0
 
     MM_FRAME_STRATEGY: FrameStrategy = FrameStrategy.HYBRID
     MM_FRAME_SAMPLING_FPS: int = 2
     MM_SCENE_THRESHOLD: float = 0.30
-    MM_SCENE_MIN_INTERVAL_SEC: float = 8.0
+    MM_SCENE_MIN_INTERVAL_SEC: float = 2.0
     MM_MAX_KEYFRAMES_PER_MIN: int = 30
     MM_DEDUP_HASH_THRESHOLD: int = 6
     MM_RESIZE_FRAME: bool = True
@@ -538,6 +559,8 @@ class Settings(BaseSettings):
     WHISPER_DEVICE: str = "auto"
     WHISPER_COMPUTE_TYPE: str = "auto"
     WHISPER_LANGUAGE: str | None = None
+    # Cap transcript chunks by audio duration as well as token/word budget.
+    WHISPER_CHUNK_MAX_SECONDS: float = 10.0
 
     DEEPSEEK_INPUT_COST_PER_1M: float = 0.27
     DEEPSEEK_OUTPUT_COST_PER_1M: float = 1.10
@@ -557,6 +580,15 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("KEYWORD_EXPANSION", mode="before")
+    @classmethod
+    def _legacy_expansion_is_corpus(cls, value):
+        # The removed WordNet mode required a large external corpus. Keep old
+        # .env files working by mapping that retired value to CORPUS expansion.
+        if isinstance(value, str) and value.strip().upper() == "WORDNET":
+            return "CORPUS"
+        return value
+
     @field_validator(
         "SYSTEM_MODE",
         "ACTIVE_DB_ENGINE",
@@ -572,6 +604,7 @@ class Settings(BaseSettings):
         "SUMMARY_ALGORITHM",
         "SUMMARY_SEMANTIC_UNIT",
         "TYPO_CORRECTION",
+        "KEYWORD_EXPANSION",
         mode="before",
     )
     @classmethod
@@ -658,6 +691,13 @@ class Settings(BaseSettings):
             raise ValueError("Chunk size, token budget, and overlap must be non-negative.")
         return value
 
+    @field_validator("ANSWER_TOP_K")
+    @classmethod
+    def _valid_answer_top_k(cls, value: int) -> int:
+        if int(value) < 0:
+            raise ValueError("ANSWER_TOP_K must be non-negative (0 = all results).")
+        return value
+
     @field_validator("SUMMARY_TARGET_WORDS")
     @classmethod
     def _valid_summary_target_words(cls, value: int) -> int:
@@ -732,7 +772,25 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _default_keyword_expansion(self) -> "Settings":
+        # An explicitly configured value always wins (so exact-name searches can
+        # keep OFF). Otherwise keyword-only retrieval benefits from the cheap
+        # corpus expansion instead of silently disabling it for most users.
+        if "KEYWORD_EXPANSION" in self.model_fields_set:
+            return self
+        if (
+            self.SEARCH_MODE is SearchMode.KEYWORD
+            or self.EMBEDDING_PROVIDER is EmbeddingProvider.NONE
+        ):
+            self.KEYWORD_EXPANSION = KeywordExpansion.CORPUS
+        return self
+
+    @model_validator(mode="after")
     def _validate_embedding_dim(self) -> "Settings":
+        if self.EMBEDDING_PROVIDER is EmbeddingProvider.NONE:
+            # No vectors are produced or queried; a stale dimension from a
+            # previous model must not rewrite EMBEDDING_DIMENSION at startup.
+            return self
         valid = KNOWN_EMBEDDING_DIMS.get(self.EMBEDDING_MODEL)
         if valid is None or self.EMBEDDING_DIMENSION in valid:
             return self
@@ -1026,6 +1084,8 @@ class Settings(BaseSettings):
 
     @property
     def embeddings_local_enabled(self) -> bool:
+        if self.EMBEDDING_PROVIDER is EmbeddingProvider.NONE:
+            return False
         if self.EMBEDDING_PROVIDER is EmbeddingProvider.LOCAL:
             return True
         return self.EMBEDDING_LOCAL_FALLBACK and self.has_cuda

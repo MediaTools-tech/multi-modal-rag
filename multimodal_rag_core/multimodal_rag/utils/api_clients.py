@@ -16,6 +16,8 @@ from multimodal_rag.utils.token_tracker import TokenTracker
 
 logger = logging.getLogger(__name__)
 
+_TRAILING_SENTENCE_PUNCT_RE = re.compile(r"""[.!?;:,\s]+(["')\]]*)$""")
+
 FRAME_PROMPT = (
     "You are captioning consecutive keyframes of a video for a search index. "
     "Return ONLY a JSON array of exactly {n} objects, in the same order as the "
@@ -99,20 +101,31 @@ def _flatten_frame_description(item: dict) -> str:
                     )
                 else:
                     bits.append(str(entry))
-            return "; ".join(part for part in (bit.strip() for bit in bits) if part)
+            unique: list[str] = []
+            seen: set[str] = set()
+            for bit in bits:
+                part = bit.strip()
+                key = part.casefold()
+                if part and key not in seen:
+                    seen.add(key)
+                    unique.append(part)
+            return "; ".join(unique)
         return str(value or "").strip()
 
+    def _sentence(value: str) -> str:
+        return _TRAILING_SENTENCE_PUNCT_RE.sub(r"\1", value.strip())
+
     sentences = []
-    action = _text(item.get("core_actions"))
+    action = _sentence(_text(item.get("core_actions")))
     if action:
         sentences.append(action)
-    on_screen = _text(item.get("on_screen_text"))
+    on_screen = _sentence(_text(item.get("on_screen_text")))
     if on_screen:
         sentences.append(f'On-screen text: "{on_screen}"')
-    objects = _text(item.get("objects"))
+    objects = _sentence(_text(item.get("objects")))
     if objects:
         sentences.append(f"Visible: {objects}")
-    setting = _text(item.get("setting"))
+    setting = _sentence(_text(item.get("setting")))
     if setting:
         sentences.append(f"Setting: {setting}")
     return ". ".join(sentences)
@@ -142,9 +155,10 @@ class _FrameCache:
     """Disk cache of per-frame descriptions keyed by image hash."""
 
     #: Bumped when the stored value format changes (v1 = raw JSON objects,
-    #: v2 = flattened captions) so stale entries are never served for the
-    #: same frames after an upgrade. Old entries stay orphaned on disk.
-    _VERSION = "vlm-desc-v2:"
+    #: v2 = flattened captions, v3 = cleaned/deduplicated captions) so stale
+    #: entries are never served for the same frames after an upgrade. Old
+    #: entries stay orphaned on disk.
+    _VERSION = "vlm-desc-v3:"
 
     def __init__(self, directory: str, enabled: bool) -> None:
         self.dir = Path(directory) if enabled else None
@@ -310,7 +324,7 @@ class GeminiClient:
             )
             text = self._generate([prompt, *parts], json_mode=True)
             for (index, _, _, key), description in zip(
-                batch, _parse_descriptions(text, len(batch))
+                batch, _parse_descriptions(text, len(batch)), strict=False
             ):
                 results[index] = description
                 self.cache.put(key, description)
@@ -844,6 +858,9 @@ def generate_rag_answer(
     """Synthesize a cited answer from retrieved results; None if no text LLM."""
     if not results:
         return None
+    answer_top_k = int(getattr(settings, "ANSWER_TOP_K", 0) or 0)
+    if answer_top_k > 0:
+        results = results[:answer_top_k]
     client = build_chat_client(settings, tracker)
     if client is None:
         return None

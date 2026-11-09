@@ -92,6 +92,23 @@ class FfmpegDownloadWorker(QThread):
             self.done.emit(False, f"{type(exc).__name__}: {exc}")
 
 
+class BackfillWorker(QThread):
+    # result dict, error message
+    done = Signal(object, str)
+
+    def __init__(self, service: BackendService) -> None:
+        super().__init__()
+        self.service = service
+
+    def run(self) -> None:
+        try:
+            result = self.service.backfill_embeddings()
+        except Exception as exc:  # noqa: BLE001
+            self.done.emit({}, f"{type(exc).__name__}: {exc}")
+        else:
+            self.done.emit(result, "")
+
+
 class SearchWorker(QThread):
     # results, groups, answer, error
     completed = Signal(object, object, str, str)

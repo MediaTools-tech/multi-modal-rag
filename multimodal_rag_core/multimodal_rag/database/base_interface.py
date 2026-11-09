@@ -54,6 +54,24 @@ class DocumentRepository(ABC):
         """
         return iter(())
 
+    def iter_missing_vectors(self, batch_size: int = 500) -> Iterator[list[VectorRecord]]:
+        """Yield records stored without embeddings (keyword-only ingestion).
+
+        Uses ``iter_records`` so both engines share one implementation; the
+        caller groups by ``source_path`` and re-embeds whole files in place.
+        """
+        batch: list[VectorRecord] = []
+        for records in self.iter_records(batch_size):
+            for record in records:
+                if record.vector is not None and len(record.vector) > 0:
+                    continue
+                batch.append(record)
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+        if batch:
+            yield batch
+
     @abstractmethod
     def get_by_file_hash(self, file_hash: str) -> list[VectorRecord]:
         ...

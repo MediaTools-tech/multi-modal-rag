@@ -15,16 +15,19 @@ cross-encoder re-ranker.
 
 ## Requirements & constraints (read first)
 
-- **Python >= 3.11** (3.12 recommended) — Python not required for Pyinstaller version executable, for all other install options(B to D) python is required.
-- **AVX2 CPU required for LanceDB — the default engine (`MULTI_MODAL_RAG`).** Generally, old CPUs lack AVX2 suppport.
-Without AVX2, `pylance` aborts with `Illegal instruction` (a native crash, not a catchable Python error).
+- **Python >= 3.11** (3.12 recommended) — not required for the Windows executable; required for
+  the pip and Docker options.
+- **AVX2 CPU required for LanceDB — the default engine (`MULTI_MODAL_RAG`).** Older CPUs may
+  lack AVX2 support. Without AVX2, `pylance` aborts with `Illegal instruction` (a native crash,
+  not a catchable Python error).
   On such hosts set `ACTIVE_DB_ENGINE=POSTGRES` (needs Postgres).
 - **Engine and content mode are independent.** `ACTIVE_DB_ENGINE` (storage) and `SYSTEM_MODE`
   (content policy) are orthogonal — **Postgres + pgvector can hold multimodal content too**;
   it just needs pgvector installed. LanceDB is the default because it is embedded (no server,
   no Docker). Postgres is only needed when you choose `ACTIVE_DB_ENGINE=POSTGRES`.
-- **No API key is required for the default embeddings or file summaries.** Out of the box,
-  `EMBEDDING_PROVIDER=LOCAL` with `BAAI/bge-base-en-v1.5` runs on CPU (downloads once), and
+- **No API key is required for embeddings or file summaries.** `EMBEDDING_PROVIDER=LOCAL` runs on
+  CPU (downloads once); `BAAI/bge-small-en-v1.5` (384-d) is the recommended small/fast choice,
+  while `.env.example` defaults to the larger `BAAI/bge-base-en-v1.5` (768-d).
   `SUMMARY_PROVIDER=LOCAL` builds summaries with semantic LexRank over the chunk vectors that
   ingestion already computed. For cited answers and image/video captions, the **minimum cloud
   setup is one Google AI Studio key** (`VLM_API_KEY` and `LLM_API_KEY`; legacy
@@ -44,6 +47,25 @@ Without AVX2, `pylance` aborts with `Illegal instruction` (a native crash, not a
 - **The desktop GUI needs a display** (Windows/macOS/X11/Wayland); use the CLIs on headless hosts.
 - **Keep `data/` on a local disk** — SQLite WAL + LanceDB dislike network / cloud-synced folders.
 - **VLC is optional**, used only for timestamped video playback from the GUI.
+
+## Quick start (Windows, recommended)
+
+1. Download the Windows release zip from GitHub Releases, extract it to a local folder such as
+   `C:\MultiModalRAG` (not OneDrive/network storage), and run `MultiModalRAG.exe`.
+2. Get a free key from [Google AI Studio](https://aistudio.google.com/app/apikey). The same key
+   can be used for the vision and text roles.
+3. Open **Settings** and choose the CPU-friendly setup:
+   - `EMBEDDING_PROVIDER=LOCAL`, `EMBEDDING_MODEL=BAAI/bge-small-en-v1.5`,
+     `EMBEDDING_DIMENSION=384`
+   - `VLM_PROVIDER=GEMINI`, `VLM_API_KEY=<your key>`
+   - `LLM_PROVIDER=GEMINI`, `LLM_API_KEY=<your key>`
+   - `SYSTEM_MODE=MULTI_MODAL_RAG`, `ACTIVE_DB_ENGINE=LANCEDB`
+4. Click **Add Folder...** or drop files into the inbox, wait for `processed`, then ask a
+   question in the chat.
+
+Most settings apply live; only storage paths (`DATA_DIR`, `INBOX_DIR`, `LANCEDB_DIR`,
+`STATE_DB_PATH`, etc.) need a restart. See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for the
+full Windows walkthrough, offline/keyword-only setups, GUI details, and troubleshooting.
 
 ## Repository layout
 
@@ -129,7 +151,11 @@ binary: `-v "$(which ffmpeg):/usr/local/bin/ffmpeg:ro"`.
 
 ## Configure
 
-Copy `.env.example` to `.env`. Key settings:
+Copy `.env.example` to `.env`, or use **Settings** in the GUI (it edits the same file). Most
+settings, including `ACTIVE_DB_ENGINE`, apply live by reloading the backend; storage-path changes
+need a restart. For the recommended CPU setup use `EMBEDDING_PROVIDER=LOCAL`,
+`EMBEDDING_MODEL=BAAI/bge-small-en-v1.5`, `EMBEDDING_DIMENSION=384`, and one Google AI Studio key
+in `VLM_API_KEY` + `LLM_API_KEY` for captions and cited answers. Key settings:
 
 | Setting | Purpose |
 | --- | --- |
@@ -139,8 +165,12 @@ Copy `.env.example` to `.env`. Key settings:
 | `VLM_*` | vision purpose: provider, model, `VLM_API_KEY` |
 | `LLM_*` | text purpose: provider, model, `LLM_API_KEY` |
 | `SUMMARY_*` | local semantic LexRank (default) or LLM summaries; word/char budgets plus an automatic embedding-token-window clamp |
-| `SEARCH_MODE` | `auto` / `chunk` / `summary` / `hybrid` |
-| `TYPO_CORRECTION` | `LOCAL` (default, free SymSpell lookup against indexed words), `LLM` (one text-LLM query rewrite per search), or `OFF` |
+| `SEARCH_MODE` | `auto` / `chunk` / `summary` / `hybrid` / `keyword` |
+| `SEARCH_TOP_K` | retrieved passages before reranking/answer generation |
+| `ANSWER_TOP_K` | `3` (default) passages sent to the answer LLM; `0` = all retrieved |
+| `KEYWORD_EXPANSION` | unset → `CORPUS` in keyword-only/no-embedding mode; `OFF` / `CORPUS` / `SYNONYMS` / `CORPUS+SYNONYMS` |
+| `TYPO_CORRECTION` | `LOCAL` (default, free SymSpell + unique-prefix completion against indexed words), `LLM` (one text-LLM query rewrite per search), or `OFF` |
+| `GUI_THEME` | desktop colors: `Midnight` / `Graphite` / `Ocean` / `Daylight`; applies live |
 | `MRAG_HOME` | app root for `.env`, `data/`, `state.db` (default `~/.multimodal_rag`, or cwd when a `.env` is present) |
 
 Providers are configured **by purpose** (embeddings / vlm / llm), each with its own provider, model
@@ -183,19 +213,20 @@ mrag-db-copy --from LANCEDB --to POSTGRES --replace
 `mrag-db-copy` preserves stored vectors, chunks, summaries, metadata and timestamps. The target
 must use the same embedding dimension; add `--replace` when the target already contains records.
 It also copies the engine-specific `state.db` queue/status rows when applicable (`--no-state`
-skips that). Stop the GUI/ingestion worker before copying, then set `ACTIVE_DB_ENGINE` to the
-target and restart.
+skips that). Stop the GUI/ingestion worker before copying, then switch `ACTIVE_DB_ENGINE`.
 
 Switching `ACTIVE_DB_ENGINE` in the GUI/`.env` is handled automatically when `state.db` is shared:
-on startup the app copies only the processed files missing from the current engine (vectors are
-reused, no re-parsing/re-embedding). If that sync fails, rows show `processed (not in index)` and
-the GUI's **Reindex** button requeues them. `mrag-db-copy` remains the explicit full-copy tool.
+the app reloads the backend and copies only the processed files missing from the current engine
+(vectors are reused, no re-parsing/re-embedding). If that sync fails, rows show
+`processed (not in index)` and the GUI's **Reindex** button requeues them. `mrag-db-copy`
+remains the explicit full-copy tool.
 
 Query (retrieval + optional cited LLM answer):
 
 ```bash
 mrag-query "the story about a man who owns a mansion"
 mrag-query "mansion" --mode summary --answer
+mrag-query "invoice 4831" --mode keyword
 mrag-query "revenue" --folder /data/processed --json
 mrag-query -i                    # interactive REPL
 ```
@@ -204,13 +235,39 @@ mrag-query -i                    # interactive REPL
 
 | Mode | What it searches | Reranked? | When to use |
 | --- | --- | --- | --- |
-| `auto` | chunk first; falls back to hybrid when retrieval is empty or the LLM answer abstains | chunk pass: no; hybrid fallback: yes | cheap fast path with a safety net; chat shows which mode answered |
+| `auto` | chunk first; falls back to hybrid when retrieval is empty or the LLM answer abstains (keyword when no embedder) | chunk pass: no; hybrid fallback: yes | cheap fast path with a safety net; chat shows which mode answered |
 | `hybrid` (default) | chunk + summary vectors + keyword search, fused with RRF | yes (cross-encoder) | best recall; answers cite the fused top hits |
 | `summary` | file-level summary vectors only | no | "which files are about X?" |
 | `chunk` | passage-level chunk vectors only (pure semantic search) | no | fastest; literal passage lookup |
+| `keyword` | full-text/BM25 over chunks only; no query embedding | no | exact terms, names, codes; optional corpus/synonym expansion |
+
+When `KEYWORD_EXPANSION` is unset, keyword-only and no-embedding searches default to `CORPUS`.
+`OFF` keeps the query literal and is best for exact names and codes. `CORPUS` uses
+pseudo-relevance feedback from the top lexical hits (for example furniture terms around
+“chair”), filtering terms that are too common across the result pool. `SYNONYMS` adds a few
+generic synonyms from the bundled compact map, and
+`CORPUS+SYNONYMS` combines both. All expansion is local: no model or data download. Lexical
+search also matches source paths/filenames, and local typo correction completes unambiguous
+prefixes such as `authentica` → `authentication`. Numeric grouping is normalized, so `6000`
+matches `6,000`. The keyword path never embeds the query and never runs the cross-encoder.
+
+### Keyword-only mode (no embeddings)
+
+Set `EMBEDDING_PROVIDER=NONE` (and optionally `SEARCH_MODE=keyword`) to run without downloads or
+an embedding API key. Ingestion still stores chunks and summaries so keyword search has precise
+passages and citations. Later, configure an embedding model again and backfill only the missing
+vectors without re-parsing files:
+
+```bash
+mrag-ingest backfill-embeddings          # GUI: File > Backfill embeddings
+```
+
+`auto` search falls back to keyword when no embedder is available; explicit vector modes
+(`chunk`, `summary`, `hybrid`) require embeddings.
 
 `TYPO_CORRECTION=LOCAL` (default) compares unknown query words against the indexed vocabulary
-using SymSpell and replaces only close matches, with no API call. `TYPO_CORRECTION=LLM` asks the
+using SymSpell, then completes an unambiguous prefix when no close spelling match exists. It
+only changes unknown words, with no API call. `TYPO_CORRECTION=LLM` asks the
 configured text LLM to rewrite the query once per search, falling back to local correction if no
 LLM is available. Both options are exposed in the GUI Settings screen; `OFF` disables correction.
 
@@ -221,7 +278,7 @@ in `requirements.txt`, so after Option B you can just run it:
 mrag-gui                         # 3-pane window: ingest | chat | preview (+ cited LLM answer)
 # if you installed via extras instead: pip install -e ".[gui]"
 # optional Windows .exe (build on Windows):
-pip install -e ".[gui,build]" && pyinstaller mrag-gui.spec
+pip install -e ".[gui,build]" && python build_gui.py
 ```
 
 > Automatic ingestion requires `mrag-ingest run` (or the Docker `app` service) to be running.
@@ -254,9 +311,10 @@ Practical notes:
 - `DOC_CHUNK_SIZE` / `DOC_CHUNK_OVERLAP` (words) are upper bounds; chunks are
   sentence-aware, target ~450 tokens, and are always capped at 90% of the
   embedding model's input window so small models (MiniLM/bge-small) never
-  silently truncate a passage. `DOC_CHUNK_TOKENS` / `DOC_CHUNK_OVERLAP_TOKENS`
-  override the target (0 = auto); `mrag-doctor` prints the effective chunk
-  budget. Chunks store source offsets, so local summaries remove overlap before
+  silently truncate a passage. With `EMBEDDING_PROVIDER=NONE` (keyword-only
+  search) the 450-token target applies without a model-window cap.
+  `DOC_CHUNK_TOKENS` / `DOC_CHUNK_OVERLAP_TOKENS` override the target (0 = auto);
+  `mrag-doctor` prints the effective chunk budget. Chunks store source offsets, so local summaries remove overlap before
   selecting sentences instead of repeating boundary text. Changing chunk settings
   (or upgrading from an older chunker) requires re-indexing. Very large tables
   still split across chunks.

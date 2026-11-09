@@ -30,9 +30,21 @@ def chunk_token_budget(model: str) -> int:
     return max(1, int(window * CHUNK_EMBEDDING_TOKEN_RATIO))
 
 
-def chunk_token_target(model: str, configured: int = 0) -> int:
-    """Effective chunk target: configured value or 450, capped by the model."""
+def chunk_token_target(
+    model: str,
+    configured: int = 0,
+    *,
+    embedding_enabled: bool = True,
+) -> int:
+    """Effective chunk target.
+
+    Both modes default to 450 tokens. Embedded chunks are additionally capped
+    by the model window; keyword-only chunks ignore an unused embedding model.
+    An explicit ``DOC_CHUNK_TOKENS`` always wins.
+    """
     target = int(configured) if int(configured) > 0 else CHUNK_DEFAULT_TOKENS
+    if not embedding_enabled:
+        return max(1, target)
     return max(1, min(target, chunk_token_budget(model)))
 
 

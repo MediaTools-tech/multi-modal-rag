@@ -28,6 +28,5 @@ venv/
 Thumbs.db
 .idea/
 .vscode/
-docs/
 temp_local/
 AGENTS.md

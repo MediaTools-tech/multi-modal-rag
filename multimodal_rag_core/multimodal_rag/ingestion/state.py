@@ -81,9 +81,20 @@ def fingerprint_of(settings) -> dict:
     no secret is ever stored. SYSTEM_MODE, LLM/VLM keys, models, and rates are
     deliberately excluded: they are policy/query-time and never invalidate
     stored vectors.
+
+    When embeddings are disabled the embedding keys are omitted: switching
+    between keyword-only and vector mode is a backfill, not an index rebuild.
     """
+    from multimodal_rag.config import EmbeddingProvider
+
+    embedding_disabled = (
+        getattr(settings, "EMBEDDING_PROVIDER", None) is EmbeddingProvider.NONE
+    )
+    embedding_keys = {"EMBEDDING_PROVIDER", "EMBEDDING_MODEL", "EMBEDDING_DIMENSION"}
     fingerprint = {}
     for key in INDEX_FINGERPRINT_KEYS:
+        if embedding_disabled and key in embedding_keys:
+            continue
         if key == "POSTGRES_DSN":
             fingerprint[key] = settings.postgres_dsn_sanitized
         else:

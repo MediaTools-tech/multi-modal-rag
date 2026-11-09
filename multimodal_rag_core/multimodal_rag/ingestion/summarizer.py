@@ -63,6 +63,37 @@ class DocumentSummarizer:
         return file_type in TEXTUAL_TYPES or (file_type == IMAGE_TYPE and self.include_images)
 
     @staticmethod
+    def _summary_source_records(records: list[VectorRecord]) -> list[VectorRecord]:
+        """Choose useful summary inputs for multimodal files.
+
+        Video captions repeat the same subjects/setting across frames and can
+        crowd transcript text out of an extractive summary. When speech was
+        transcribed, summarize that; otherwise keep captions. Exact duplicate
+        captions are dropped in either case.
+        """
+        source = records
+        if records and records[0].file_type == "video":
+            transcript = [
+                record
+                for record in records
+                if str(record.metadata.get("modality", "")).strip() != "visual"
+                and (record.content or "").strip()
+            ]
+            if transcript:
+                source = transcript
+
+        seen: set[str] = set()
+        unique: list[VectorRecord] = []
+        for record in source:
+            key = clean_summary_text(record.content or "").casefold()
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            unique.append(record)
+        return unique
+
+    @staticmethod
     def _ordered_records(records: list[VectorRecord]) -> list[VectorRecord]:
         def key(record: VectorRecord) -> tuple[int, float, int]:
             if record.timestamp_start is not None:
@@ -135,7 +166,8 @@ class DocumentSummarizer:
         base = records[0]
         if not self._supports(base.file_type):
             return None
-        if not any((record.content or "").strip() for record in records):
+        summary_records = self._summary_source_records(records)
+        if not any((record.content or "").strip() for record in summary_records):
             return None
 
         started = time.perf_counter()
@@ -143,7 +175,7 @@ class DocumentSummarizer:
         algorithm = ""
         semantic_unit = "NONE"
         input_chars = 0
-        chunks_considered = len(records)
+        chunks_considered = len(summary_records)
         chunks_selected = 0
         used_fallback = False
         summary = ""
@@ -151,7 +183,7 @@ class DocumentSummarizer:
 
         if self.provider in (SummaryProvider.LOCAL, SummaryProvider.AUTO):
             try:
-                summary, local_result = self._generate_local(records, base.filename)
+                summary, local_result = self._generate_local(summary_records, base.filename)
             except Exception as exc:
                 logger.warning("Local summary generation failed for %s: %s", base.filename, exc)
                 summary = ""
@@ -161,7 +193,9 @@ class DocumentSummarizer:
                 semantic_unit = local_result.semantic_unit if local_result else "NONE"
                 input_chars = local_result.input_chars if local_result else 0
                 chunks_considered = (
-                    local_result.chunks_considered if local_result else len(records)
+                    local_result.chunks_considered
+                    if local_result
+                    else len(summary_records)
                 )
                 chunks_selected = local_result.chunks_selected if local_result else 0
                 used_fallback = local_result.fallback if local_result else False
@@ -171,7 +205,9 @@ class DocumentSummarizer:
             or (self.provider == SummaryProvider.LOCAL and self.fallback_to_llm)
         ):
             try:
-                summary, llm_input_chars = self._generate_llm(records, base.filename)
+                summary, llm_input_chars = self._generate_llm(
+                    summary_records, base.filename
+                )
             except Exception as exc:
                 logger.warning("LLM summary generation failed for %s: %s", base.filename, exc)
                 summary = ""
@@ -186,7 +222,9 @@ class DocumentSummarizer:
 
         if not summary and self.provider == SummaryProvider.LLM:
             try:
-                summary, llm_input_chars = self._generate_llm(records, base.filename)
+                summary, llm_input_chars = self._generate_llm(
+                    summary_records, base.filename
+                )
             except Exception as exc:
                 logger.warning("LLM summary generation failed for %s: %s", base.filename, exc)
                 summary = ""

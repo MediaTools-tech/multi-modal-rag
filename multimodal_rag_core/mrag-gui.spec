@@ -33,6 +33,15 @@ binaries = []
 # (onedir) or the extraction root (onefile); both are covered at runtime.
 datas += [(os.path.join(SPECPATH, ".env.example"), ".")]
 
+# Optional keyword expansion uses a bundled WordNet-derived synonym map. Keep it
+# next to the package so importlib.resources can find it inside the frozen app.
+datas += [
+    (
+        os.path.join(SPECPATH, "multimodal_rag", "assets", "synonyms.json.gz"),
+        "multimodal_rag/assets",
+    )
+]
+
 # Local ML (local embeddings + reranker) resolves model/tokenizer classes
 # dynamically (transformers Auto* factories, importlib.metadata versions), which
 # static analysis misses. collect_all() bundles submodules + data files, and

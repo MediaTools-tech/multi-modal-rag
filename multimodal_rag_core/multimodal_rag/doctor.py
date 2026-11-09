@@ -51,15 +51,18 @@ def _print_summaries(settings) -> None:
 
 def _print_chunking(settings) -> None:
     model = settings.EMBEDDING_MODEL
-    window = embedding_max_input_tokens(model)
+    provider = getattr(settings.EMBEDDING_PROVIDER, "value", settings.EMBEDDING_PROVIDER)
+    embedding_enabled = provider != "NONE"
+    window = embedding_max_input_tokens(model) if embedding_enabled else "n/a"
     configured = int(settings.DOC_CHUNK_TOKENS or 0)
-    effective = chunk_token_target(model, configured)
+    effective = chunk_token_target(model, configured, embedding_enabled=embedding_enabled)
     overlap = int(settings.DOC_CHUNK_OVERLAP_TOKENS or 0)
+    mode = "embedding" if embedding_enabled else "keyword-only"
     print("CHUNKING    sentence-aware token-budgeted passage splitting")
     print(f"  words    : size={settings.DOC_CHUNK_SIZE}   overlap={settings.DOC_CHUNK_OVERLAP}")
     print(
         f"  tokens   : configured={configured or 'auto'}   effective={effective}"
-        f"   model_window={window}   overlap={overlap or 'auto'}"
+        f"   mode={mode}   model_window={window}   overlap={overlap or 'auto'}"
     )
     print()
 
@@ -91,10 +94,17 @@ def _print_fingerprint(settings) -> None:
     current_values = fingerprint_of(settings)
     drift = False
     for key in INDEX_FINGERPRINT_KEYS:
+        # Keyword-only fingerprints intentionally omit embedding keys, and
+        # older stamps may lack newer keys. Match the GUI: compare only the
+        # keys present on both sides instead of reporting a false drift.
+        if key not in current_values or key not in stored:
+            continue
         current = current_values[key]
         mark = "" if stored.get(key) == current else "   <-- DIFFERS"
         drift = drift or bool(mark)
         print(f"  {key:<20} stored={stored.get(key)!r} current={current!r}{mark}")
+    if settings.EMBEDDING_PROVIDER.value == "NONE":
+        print("  embeddings disabled: keyword-only index (no vector keys)")
     if drift:
         print("  WARNING: index-time settings changed — reset the index and re-ingest")
         print("  (GUI: File -> Reset index... / CLI: mrag-ingest reset-index)")
@@ -121,20 +131,30 @@ def main(argv: list[str] | None = None) -> int:
         ok = (not needs) or bool(role.api_key)
         if role.provider == "NONE":
             ok = False
+        keyword_only = role.purpose == "embeddings" and role.provider == "NONE"
         print(f"{role.purpose.upper():<11} ({description})")
         print(f"  provider : {role.provider}")
-        print(f"  model    : {role.model}")
-        print(f"  api_key  : {_state(role, needs)}")
-        if role.base_url:
+        print(f"  model    : {'n/a (keyword-only)' if keyword_only else role.model}")
+        print(f"  api_key  : {'n/a' if keyword_only else _state(role, needs)}")
+        if role.base_url and not keyword_only:
             print(f"  base_url : {role.base_url}")
-        print(f"  effective: {_bool(ok)}")
+        print(
+            "  effective: keyword-only (no vectors)"
+            if keyword_only
+            else f"  effective: {_bool(ok)}"
+        )
         print()
 
     _print_summaries(settings)
     _print_chunking(settings)
     print("RERANKER    cross-encoder over fused candidates")
-    print(f"  provider : {settings.RERANKER_PROVIDER.value}   model={settings.RERANKER_MODEL}"
-          f"   active={settings.active_reranker}")
+    reranker_active = settings.active_reranker
+    if settings.EMBEDDING_PROVIDER.value == "NONE":
+        reranker_active += " (unused in keyword-only mode)"
+    print(
+        f"  provider : {settings.RERANKER_PROVIDER.value}   model={settings.RERANKER_MODEL}"
+        f"   active={reranker_active}"
+    )
     print()
     print(f"TYPO        query spelling correction: {settings.TYPO_CORRECTION.value}")
     print()

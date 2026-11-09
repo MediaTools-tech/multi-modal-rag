@@ -9,20 +9,30 @@ from multimodal_rag.search.reranker import CrossEncoderReranker
 logger = logging.getLogger(__name__)
 
 
-def rrf_fuse(ranked_lists: list[list[SearchResult]], k: int = 60) -> list[SearchResult]:
+def rrf_fuse(
+    ranked_lists: list[list[SearchResult]],
+    k: int = 60,
+    weights: list[float] | None = None,
+) -> list[SearchResult]:
     """Reciprocal Rank Fusion of several ranked result lists.
 
     Returns new ``SearchResult`` objects whose ``score`` is the fused RRF value.
     Previously the fused score was computed only for ordering and discarded, so
     callers (and the logs below) saw a stale pre-fusion score from whichever
     list ranked the record first. The source results are left untouched.
+
+    ``weights`` optionally scales each ranked list (for example, higher for the
+    original query than for corpus-expanded keyword terms).
     """
+    if weights is not None and len(weights) != len(ranked_lists):
+        raise ValueError("weights must match ranked_lists")
     fused: dict[str, float] = defaultdict(float)
     order: dict[str, SearchResult] = {}
-    for ranked in ranked_lists:
+    for index, ranked in enumerate(ranked_lists):
+        weight = weights[index] if weights is not None else 1.0
         for rank, result in enumerate(ranked):
             record_id = result.record.id
-            fused[record_id] += 1.0 / (k + rank + 1)
+            fused[record_id] += weight / (k + rank + 1)
             order.setdefault(record_id, result)
     fused_results = [
         SearchResult(record=result.record, score=fused[record_id], rank=result.rank)

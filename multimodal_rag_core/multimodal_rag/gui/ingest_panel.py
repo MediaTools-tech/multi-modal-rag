@@ -31,6 +31,7 @@ class IngestPanel(QWidget):
         super().__init__(parent)
         self._displayed: list = []
         self._last_sig: list = []
+        self._stale_ids: set[int] = set()
         self.palette = get_palette(get_settings().GUI_THEME.value)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -96,8 +97,21 @@ class IngestPanel(QWidget):
     def set_warning(self, message: str) -> None:
         self.hint.setText(message)
 
+    def apply_theme(self, theme: str) -> None:
+        self.palette = get_palette(theme)
+        self.hint.setStyleSheet(f"color: {self.palette.warn}; font-size: 11px;")
+        for row, record in enumerate(self._displayed):
+            item = self.table.item(row, 1)
+            if item is None:
+                continue
+            if record.id in self._stale_ids:
+                item.setForeground(QBrush(QColor(self.palette.warn)))
+            else:
+                item.setForeground(QBrush())
+
     def set_records(self, records: list, stale_ids: set[int] | None = None) -> None:
         stale = stale_ids or set()
+        self._stale_ids = stale
         ordered = list(reversed(records[-500:]))
         sig = [
             (record.id, record.path, record.status, record.error or "", record.id in stale)

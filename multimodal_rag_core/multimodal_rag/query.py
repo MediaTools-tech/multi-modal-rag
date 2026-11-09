@@ -9,6 +9,7 @@ from multimodal_rag.core.models import SearchResult
 from multimodal_rag.database import get_repository
 from multimodal_rag.pipeline.embedding import get_embedding_engine
 from multimodal_rag.search.hybrid import hybrid_search
+from multimodal_rag.search.keyword import run_keyword_search
 from multimodal_rag.search.reranker import CrossEncoderReranker
 from multimodal_rag.search.typo import prepare_query
 from multimodal_rag.utils.api_clients import generate_rag_answer
@@ -27,6 +28,13 @@ def _run_search(
     folder: str | None,
     rerank: bool,
 ):
+    if mode == SearchMode.KEYWORD.value:
+        return run_keyword_search(settings, repo, query, top_k, folder)
+    if embedder is None:
+        raise RuntimeError(
+            "Embedding engine is required for vector search; use --mode keyword "
+            "for embedding-free retrieval."
+        )
     query_vector = embedder.embed_query(query)
     if mode == SearchMode.CHUNK.value:
         results = repo.search(
@@ -85,6 +93,11 @@ def _run_auto_search(
     folder: str | None,
     rerank: bool,
 ):
+    if embedder is None:
+        logger.info("auto: embeddings unavailable, using keyword search")
+        return run_keyword_search(settings, repo, query, top_k, folder) + (
+            SearchMode.KEYWORD.value,
+        )
     results, groups = _run_search(
         settings, repo, embedder, query, SearchMode.CHUNK.value, top_k, folder, False
     )
@@ -274,7 +287,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("query", nargs="?", help="question / search text")
     parser.add_argument("-i", "--interactive", action="store_true", help="interactive REPL")
     parser.add_argument(
-        "--mode", choices=["auto", "chunk", "summary", "hybrid"], default=None
+        "--mode",
+        choices=["auto", "chunk", "summary", "hybrid", "keyword"],
+        default=None,
     )
     parser.add_argument("-k", "--top-k", type=int, default=None)
     parser.add_argument("--folder", default=None, help="restrict to a source_path prefix")
@@ -305,7 +320,15 @@ def main(argv: list[str] | None = None) -> int:
     tracker = TokenTracker()
     repo = get_repository(settings)
     repo.initialize()
-    embedder = get_embedding_engine(settings, tracker)
+    # Keyword-only retrieval deliberately avoids loading the embedding model.
+    embedder = None
+    if args.mode != SearchMode.KEYWORD.value:
+        try:
+            embedder = get_embedding_engine(settings, tracker)
+        except Exception as exc:
+            if args.mode != SearchMode.AUTO.value:
+                raise
+            logger.warning("embeddings unavailable; auto will use keyword-only: %s", exc)
 
     try:
         if args.interactive:

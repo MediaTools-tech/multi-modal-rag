@@ -301,6 +301,18 @@ class PreviewPanel(QWidget):
     def set_session_usage(self, text: str) -> None:
         self.usage_session.setText(f"Session: {text}")
 
+    def apply_theme(self, theme: str) -> None:
+        self.palette = get_palette(theme)
+        self.view.setStyleSheet(
+            f"background-color: {self.palette.surface_bg}; border: none; border-radius: 8px;"
+        )
+        self.usage_last.setStyleSheet(
+            f"color: {self.palette.text_muted}; font-size: 11px;"
+        )
+        self.usage_session.setStyleSheet(
+            f"color: {self.palette.link}; font-size: 11px;"
+        )
+
     def show_result(self, result) -> None:
         record = result.record
         stamp = (

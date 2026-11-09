@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class PipelineContext:
     settings: Settings
     repository: DocumentRepository
-    embedder: EmbeddingEngine
+    embedder: EmbeddingEngine | None
     summarizer: DocumentSummarizer
     vlm: object | None = None
     transcribe: Callable | None = None
@@ -47,6 +47,14 @@ def build_context(
             if require_embedder:
                 raise
             logger.warning("Embedding engine unavailable: %s", exc)
+    if embedder is None:
+        if require_embedder:
+            raise RuntimeError(
+                "Embedding engine is disabled or not configured. Set "
+                "EMBEDDING_PROVIDER=LOCAL/GOOGLE with a model/key, or use "
+                "keyword-only search."
+            )
+        logger.info("Embedding engine disabled; indexing text for keyword search only")
 
     vlm = build_vlm_describer(settings, tracker)
     local_summarizer = None

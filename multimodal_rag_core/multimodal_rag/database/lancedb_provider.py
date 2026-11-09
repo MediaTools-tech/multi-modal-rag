@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from collections import Counter
 from collections.abc import Iterator
@@ -11,13 +12,113 @@ from typing import Any
 from multimodal_rag.config import Settings
 from multimodal_rag.core.models import SearchResult, VectorRecord
 from multimodal_rag.database.base_interface import DocumentRepository
-from multimodal_rag.search.lexical import bm25_scores, tokenize
+from multimodal_rag.search.lexical import (
+    STOPWORDS,
+    bm25_scores,
+    normalize_text,
+    numeric_query_variants,
+    tokenize,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _sql_escape(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _path_tokens(value: Any) -> set[str]:
+    """Split a path/filename on separators, dots, underscores, and hyphens."""
+    if value is None or (isinstance(value, float) and value != value):
+        text = ""
+    else:
+        text = str(value)
+    return {
+        token
+        for token in re.split(r"[\W_]+", normalize_text(text).casefold(), flags=re.UNICODE)
+        if token
+    }
+
+
+def _path_query_terms(query: str, limit: int = 16) -> list[str]:
+    terms = [term for term in _path_tokens(query) if len(term) >= 2 and term not in STOPWORDS]
+    # Keep the pushed-down SQL predicate bounded even for very long queries.
+    return sorted(terms)[:limit]
+
+
+def _path_scope_filter(
+    record_types: list[str] | None,
+    folder_prefix: str | None,
+) -> str | None:
+    """Build the record-type/folder predicate shared by path lookups."""
+    if record_types == []:
+        return None
+    clauses = []
+    if folder_prefix:
+        clauses.append(f"source_path LIKE '{_sql_escape(folder_prefix)}%'")
+    if record_types is not None:
+        values = ", ".join(f"'{_sql_escape(str(value))}'" for value in record_types)
+        clauses.append(f"record_type IN ({values})")
+    return " AND ".join(clauses) or None
+
+
+def _path_filter(
+    terms: list[str],
+    record_types: list[str] | None,
+    folder_prefix: str | None,
+) -> str | None:
+    """Build a LanceDB SQL predicate for path/filename token candidates."""
+    if not terms or record_types == []:
+        return None
+    clauses = [
+        f"(lower(source_path) LIKE '%{_sql_escape(term)}%' "
+        f"OR lower(filename) LIKE '%{_sql_escape(term)}%')"
+        for term in terms
+    ]
+    where = f"({' OR '.join(clauses)})"
+    scope = _path_scope_filter(record_types, folder_prefix)
+    if scope:
+        where += f" AND {scope}"
+    return where
+
+
+#: Keep path results as complete records; the row filter already avoids a full scan.
+_PATH_COLUMNS = [
+    "id",
+    "vector",
+    "content",
+    "record_type",
+    "source_path",
+    "filename",
+    "parent_directory",
+    "file_type",
+    "mime_type",
+    "chunk_index",
+    "total_chunks",
+    "timestamp_start",
+    "timestamp_end",
+    "created_at",
+    "file_modified_at",
+    "file_hash",
+    "metadata_json",
+    "summary",
+    "has_vector",
+]
+
+#: FTS auto-projects `_score`; selecting it explicitly avoids LanceDB's
+#: deprecation warning while keeping path-column fetches narrow.
+_PATH_FTS_COLUMNS = [*_PATH_COLUMNS, "_score"]
+
+#: Match the Python path scorer: split punctuation, keep case/stopword handling
+#: in Python, and do not stem (the exact token overlap is what gets scored).
+_PATH_FTS_OPTIONS = {
+    "base_tokenizer": "simple",
+    "lower_case": True,
+    "ascii_folding": True,
+    "stem": False,
+    "remove_stop_words": False,
+    "max_token_length": 128,
+}
 
 
 class LanceDBProvider(DocumentRepository):
@@ -28,6 +129,12 @@ class LanceDBProvider(DocumentRepository):
         self.db_path = Path(settings.LANCEDB_DIR)
         self.table_name = settings.DB_TABLE_NAME
         self.dim = settings.EMBEDDING_DIMENSION
+        # The table's actual vector width can differ from the current setting
+        # (e.g. keyword-only mode after changing embedding models). Placeholder
+        # vectors must match the stored column, not the configured dimension.
+        self._storage_dim = self.dim
+        self._path_pushdown_supported = True
+        self._path_fts_supported = False
         self._conn: Any = None
         self._table: Any = None
         self._write_lock = threading.Lock()
@@ -41,6 +148,7 @@ class LanceDBProvider(DocumentRepository):
             [
                 pa.field("id", pa.string(), nullable=False),
                 pa.field("vector", pa.list_(pa.float32(), self.dim), nullable=False),
+                pa.field("has_vector", pa.bool_(), nullable=False),
                 pa.field("content", pa.string()),
                 pa.field("record_type", pa.string()),
                 pa.field("source_path", pa.string()),
@@ -77,6 +185,24 @@ class LanceDBProvider(DocumentRepository):
             self._table = self._conn.create_table(
                 self.table_name, schema=self._schema(), mode="create"
             )
+        self._storage_dim = self._read_vector_dim()
+        if self._storage_dim != self.dim:
+            if self.settings.EMBEDDING_PROVIDER.value == "NONE":
+                logger.warning(
+                    "LanceDB vector column is %d-dimensional but "
+                    "EMBEDDING_DIMENSION=%d; keyword-only placeholders will use "
+                    "the table dimension",
+                    self._storage_dim,
+                    self.dim,
+                )
+            else:
+                raise RuntimeError(
+                    f"LanceDB table {self.table_name!r} stores "
+                    f"{self._storage_dim}-dimensional vectors but "
+                    f"EMBEDDING_DIMENSION={self.dim}. Reset the index "
+                    "(GUI: File -> Reset index... / CLI: mrag-ingest reset-index) "
+                    "or use a new LANCEDB_DIR."
+                )
         self._ensure_fts_index()
         self._ensure_vector_index()
         self._vocab_cache = None
@@ -84,18 +210,41 @@ class LanceDBProvider(DocumentRepository):
             "LanceDBProvider initialized (dir=%s, table=%s)", self.db_path, self.table_name
         )
 
+    def _read_vector_dim(self) -> int:
+        field = self._table.schema.field("vector")
+        size = getattr(field.type, "list_size", None)
+        if size is None:
+            raise RuntimeError(
+                "LanceDB vector column is not a fixed-size list; reset the index."
+            )
+        return int(size)
+
     def _ensure_columns(self) -> None:
         existing = {field.name for field in self._table.schema}
         defaults = {}
         if "record_type" not in existing:
-            defaults["record_type"] = "chunk"
+            defaults["record_type"] = "cast('chunk' as string)"
         if "summary" not in existing:
-            defaults["summary"] = ""
+            defaults["summary"] = "cast('' as string)"
+        if "has_vector" not in existing:
+            # Existing rows were created before embedding-free indexing existed
+            # and therefore have real vectors.
+            defaults["has_vector"] = "cast(true as boolean)"
         if defaults:
+            # LanceDB evaluates these as SQL expressions per row, not as Python
+            # values. Passing a bool raises "not an instance of 'str'".
             try:
                 self._table.add_columns(defaults)
             except Exception as exc:
                 logger.warning("LanceDB column migration failed: %s", exc)
+            missing = set(defaults) - {field.name for field in self._table.schema}
+            if missing:
+                raise RuntimeError(
+                    "LanceDB could not migrate the table to the current schema "
+                    f"(missing: {', '.join(sorted(missing))}). Reset the index "
+                    "(GUI: File -> Reset index... / CLI: mrag-ingest reset-index) "
+                    "or use a new LANCEDB_DIR."
+                ) from None
 
     def _create_vector_index(self, index_type: str, num_partitions: int) -> None:
         """Create the ANN index, tolerating old and new lancedb APIs.
@@ -161,14 +310,21 @@ class LanceDBProvider(DocumentRepository):
                 if "already exists" not in str(exc2).lower():
                     logger.warning("LanceDB default vector index failed: %s", exc2)
 
-    def _ensure_fts_index(self) -> None:
+    def _create_fts_index(self, field: str, *, replace: bool = False, **options) -> bool:
         try:
-            self._table.create_fts_index("content")
+            self._table.create_fts_index(field, replace=replace, **options)
+            return True
         except Exception as exc:
-            if "already exists" not in str(exc).lower():
-                logger.warning(
-                    "LanceDB FTS index creation failed (will use BM25 fallback): %s", exc
-                )
+            if "already exists" in str(exc).lower():
+                return True
+            logger.warning("LanceDB FTS index on %s failed: %s", field, exc)
+            return False
+
+    def _ensure_fts_index(self) -> None:
+        self._create_fts_index("content")
+        self._path_fts_supported = self._create_fts_index(
+            "source_path", **_PATH_FTS_OPTIONS
+        )
 
     def reindex(self) -> None:
         # Skip rebuilding when nothing changed since the last rebuild. The dirty
@@ -185,10 +341,10 @@ class LanceDBProvider(DocumentRepository):
         except Exception:
             pass
         self._ensure_vector_index()
-        try:
-            self._table.create_fts_index("content", replace=True)
-        except Exception as exc:
-            logger.warning("LanceDB FTS reindex failed: %s", exc)
+        self._create_fts_index("content", replace=True)
+        self._path_fts_supported = self._create_fts_index(
+            "source_path", replace=True, **_PATH_FTS_OPTIONS
+        )
         self._dirty = False
 
     def insert(self, records: list[VectorRecord]) -> int:
@@ -197,6 +353,12 @@ class LanceDBProvider(DocumentRepository):
         data = []
         for record in records:
             payload = record.to_dict()
+            has_vector = record.vector is not None and len(record.vector) > 0
+            payload["has_vector"] = has_vector
+            if not has_vector:
+                # LanceDB's fixed-size vector column is non-null; store a
+                # placeholder and exclude it from vector search via has_vector.
+                payload["vector"] = [0.0] * self._storage_dim
             payload["metadata_json"] = json.dumps(payload.pop("metadata", {}))
             data.append(payload)
         with self._write_lock:
@@ -217,14 +379,14 @@ class LanceDBProvider(DocumentRepository):
         record_types: list[str] | None = None,
         folder_prefix: str | None = None,
     ) -> list[SearchResult]:
-        where = None
+        conditions = ["has_vector = true"]
         if folder_prefix:
-            where = f"source_path LIKE '{_sql_escape(folder_prefix)}%'"
+            conditions.append(f"source_path LIKE '{_sql_escape(folder_prefix)}%'")
+        where = " AND ".join(conditions)
         fetch_limit = top_k * 5 if record_types else top_k
 
         query = self._table.search(query_vector).metric("cosine")
-        if where:
-            query = query.where(where)
+        query = query.where(where)
         frame = query.limit(fetch_limit).to_pandas()
 
         results: list[SearchResult] = []
@@ -240,6 +402,123 @@ class LanceDBProvider(DocumentRepository):
                 break
         return results
 
+    def _path_fts_frame(
+        self,
+        terms: list[str],
+        limit: int,
+        record_types: list[str] | None,
+        folder_prefix: str | None,
+    ) -> Any:
+        """Fetch path candidates from the ``source_path`` FTS index."""
+        from lancedb.query import FullTextOperator, MatchQuery
+
+        match = MatchQuery(
+            " ".join(terms),
+            "source_path",
+            operator=FullTextOperator.OR,
+            fuzziness=0,
+        )
+        query = self._table.search(match, query_type="fts")
+        scope = _path_scope_filter(record_types, folder_prefix)
+        if scope:
+            query = query.where(scope)
+        # Overfetch because the FTS score is only a candidate filter; exact
+        # term-count scoring happens below.
+        return query.limit(limit).select(_PATH_FTS_COLUMNS).to_pandas()
+
+    def _path_results(
+        self,
+        query: str,
+        top_k: int,
+        record_types: list[str] | None,
+        folder_prefix: str | None,
+        frame=None,
+    ) -> list[SearchResult]:
+        """Rank chunks by filename/source-path token overlap."""
+        terms = _path_query_terms(query)
+        if not terms or record_types == []:
+            return []
+        if frame is None:
+            # Inserted rows are not in the FTS index until reindex() runs, so
+            # use the live filtered scan while the table is dirty.
+            if getattr(self, "_path_fts_supported", False) and not getattr(
+                self, "_dirty", False
+            ):
+                try:
+                    frame = self._path_fts_frame(
+                        terms,
+                        max(top_k * 100, 1000),
+                        record_types,
+                        folder_prefix,
+                    )
+                except Exception as exc:
+                    self._path_fts_supported = False
+                    logger.warning(
+                        "LanceDB path FTS failed, falling back to filtered scan: %s",
+                        exc,
+                    )
+            if frame is None:
+                where = _path_filter(terms, record_types, folder_prefix)
+                if where is None:
+                    return []
+                if getattr(self, "_path_pushdown_supported", True):
+                    try:
+                        # Plain SQL scan (no vector/FTS) with the substring predicate
+                        # pushed down: only candidate rows cross into pandas.
+                        frame = (
+                            self._table.search(None)
+                            .where(where)
+                            .select(_PATH_COLUMNS)
+                            .to_pandas()
+                        )
+                    except Exception as exc:
+                        self._path_pushdown_supported = False
+                        logger.warning(
+                            "LanceDB path filter failed, falling back to table scans: %s",
+                            exc,
+                        )
+                        frame = self._table.to_pandas()
+                else:
+                    frame = self._table.to_pandas()
+        if frame.empty:
+            return []
+        if folder_prefix:
+            frame = frame[
+                frame["source_path"].fillna("").str.startswith(folder_prefix)
+            ]
+        if record_types:
+            frame = frame[frame["record_type"].isin(record_types)]
+        if frame.empty:
+            return []
+
+        scored: list[tuple[float, Any]] = []
+        for _, row in frame.iterrows():
+            path_terms = _path_tokens(row.get("source_path"))
+            name_terms = _path_tokens(row.get("filename"))
+            matched = [
+                term for term in terms if term in path_terms or term in name_terms
+            ]
+            if not matched:
+                continue
+            # A filename match is stronger than an incidental parent-directory
+            # match, and matching more query terms is better than matching one.
+            score = len(matched) + 0.5 * sum(
+                1 for term in terms if term in name_terms
+            )
+            scored.append((score, row))
+        if not scored:
+            return []
+
+        scored.sort(key=lambda item: (-item[0], str(item[1].get("source_path") or "")))
+        max_score = scored[0][0] or 1.0
+        results: list[SearchResult] = []
+        for rank, (score, row) in enumerate(scored[:top_k], start=1):
+            record = self._row_to_record(row.to_dict())
+            results.append(
+                SearchResult(record=record, score=score / max_score, rank=rank)
+            )
+        return results
+
     def search_lexical(
         self,
         query: str,
@@ -251,58 +530,101 @@ class LanceDBProvider(DocumentRepository):
         if folder_prefix:
             where = f"source_path LIKE '{_sql_escape(folder_prefix)}%'"
 
-        try:
-            fts = self._table.search(query, query_type="fts")
-            if where:
-                fts = fts.where(where)
-            frame = fts.limit(top_k).to_pandas()
-            results: list[SearchResult] = []
-            for _, row in frame.iterrows():
-                data = row.to_dict()
-                record = self._row_to_record(data)
+        content_results: list[SearchResult] = []
+        full_frame = None
+        variants = numeric_query_variants(query)
+        for variant in variants:
+            variant_results: list[SearchResult] = []
+            try:
+                fts = self._table.search(variant, query_type="fts")
+                if where:
+                    fts = fts.where(where)
+                # record_type is filtered below, so overfetch when a caller asks
+                # for chunks only; otherwise summary rows can crowd chunks out
+                # of the pre-filter limit.
+                fetch_limit = top_k * 5 if record_types else top_k
+                frame = fts.limit(fetch_limit).to_pandas()
+                for _, row in frame.iterrows():
+                    data = row.to_dict()
+                    record = self._row_to_record(data)
+                    if record_types is not None and record.record_type not in record_types:
+                        continue
+                    variant_results.append(
+                        SearchResult(
+                            record=record,
+                            score=abs(float(data.get("_score", 0.0) or 0.0)),
+                        )
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "LanceDB FTS failed for %r, falling back to BM25: %s", variant, exc
+                )
+                continue
+            if not variant_results:
+                continue
+            variant_max = max(result.score for result in variant_results) or 1.0
+            for result in variant_results:
+                result.score = result.score / variant_max
+            content_results.extend(variant_results)
+
+        if content_results:
+            by_id: dict[str, SearchResult] = {}
+            for result in content_results:
+                existing = by_id.get(result.record.id)
+                if existing is None or result.score >= existing.score:
+                    by_id[result.record.id] = result
+            content_results = list(by_id.values())
+            content_results.sort(key=lambda r: r.score, reverse=True)
+            for rank, result in enumerate(content_results, start=1):
+                result.rank = rank
+
+        if not content_results:
+            full_frame = self._table.to_pandas()
+            if full_frame.empty:
+                return []
+            if folder_prefix:
+                full_frame = full_frame[
+                    full_frame["source_path"].fillna("").str.startswith(folder_prefix)
+                ]
+            docs = [
+                (str(row["id"]), str(row.get("content") or ""))
+                for _, row in full_frame.iterrows()
+            ]
+            scores = bm25_scores(tokenize(query), docs)
+            ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+            max_score = ranked[0][1] if ranked and ranked[0][1] > 0 else 1.0
+            by_id = {str(row["id"]): row for _, row in full_frame.iterrows()}
+            for doc_id, raw_score in ranked:
+                if raw_score <= 0:
+                    continue
+                record = self._row_to_record(by_id[doc_id].to_dict())
                 if record_types is not None and record.record_type not in record_types:
                     continue
-                results.append(
-                    SearchResult(record=record, score=abs(float(data.get("_score", 0.0) or 0.0)))
+                content_results.append(
+                    SearchResult(
+                        record=record,
+                        score=raw_score / max_score,
+                        rank=len(content_results) + 1,
+                    )
                 )
-            if results:
-                max_score = max(r.score for r in results) or 1.0
-                for result in results:
-                    result.score = result.score / max_score
-                results.sort(key=lambda r: r.score, reverse=True)
-                for rank, result in enumerate(results, start=1):
-                    result.rank = rank
-                return results
-        except Exception as exc:
-            logger.warning("LanceDB FTS failed, falling back to BM25: %s", exc)
+                if len(content_results) >= top_k:
+                    break
 
-        frame = self._table.to_pandas()
-        if frame.empty:
-            return []
-        if folder_prefix:
-            frame = frame[
-                frame["source_path"].fillna("").str.startswith(folder_prefix)
-            ]
-        docs = [
-            (str(row["id"]), str(row.get("content") or "")) for _, row in frame.iterrows()
-        ]
-        scores = bm25_scores(tokenize(query), docs)
-        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-        max_score = ranked[0][1] if ranked and ranked[0][1] > 0 else 1.0
-        by_id = {str(row["id"]): row for _, row in frame.iterrows()}
-        results = []
-        for doc_id, raw_score in ranked:
-            if raw_score <= 0:
-                continue
-            record = self._row_to_record(by_id[doc_id].to_dict())
-            if record_types is not None and record.record_type not in record_types:
-                continue
-            results.append(
-                SearchResult(record=record, score=raw_score / max_score, rank=len(results) + 1)
-            )
-            if len(results) >= top_k:
-                break
-        return results
+        path_results = self._path_results(
+            query, top_k, record_types, folder_prefix, full_frame
+        )
+        if not content_results:
+            return path_results[:top_k]
+        if not path_results:
+            return content_results[:top_k]
+        from multimodal_rag.search.hybrid import rrf_fuse
+
+        fused = rrf_fuse(
+            [content_results, path_results], k=60, weights=[3.0, 1.0]
+        )[:top_k]
+        for rank, result in enumerate(fused, start=1):
+            result.rank = rank
+        return fused
 
     def lexical_vocabulary(self, max_terms: int = 50000) -> dict[str, int]:
         if self._vocab_cache is not None:
@@ -381,10 +703,15 @@ class LanceDBProvider(DocumentRepository):
     def get_stats(self) -> dict[str, int]:
         frame = self._table.to_pandas()
         if frame.empty:
-            return {"total_records": 0, "total_files": 0}
+            return {"total_records": 0, "total_files": 0, "missing_vectors": 0}
+        if "has_vector" in frame:
+            missing = int((~frame["has_vector"].fillna(True).astype(bool)).sum())
+        else:
+            missing = 0
         return {
             "total_records": int(len(frame)),
             "total_files": int(frame["source_path"].nunique()),
+            "missing_vectors": missing,
         }
 
     def indexed_file_hashes(self) -> set[str]:
@@ -408,6 +735,9 @@ class LanceDBProvider(DocumentRepository):
         record = dict(data)
         record.pop("_distance", None)
         record.pop("_score", None)
+        has_vector = record.pop("has_vector", True)
+        if has_vector is False or str(has_vector).lower() in ("false", "0"):
+            record["vector"] = []
         metadata = record.pop("metadata_json", None)
         if isinstance(metadata, str) and metadata:
             try:

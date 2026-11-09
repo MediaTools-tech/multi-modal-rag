@@ -193,6 +193,45 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_embeddings(settings: Settings, args: argparse.Namespace) -> int:
+    from multimodal_rag.ingestion.backfill import backfill_embeddings
+    from multimodal_rag.pipeline.context import build_context
+
+    if settings.EMBEDDING_PROVIDER.value == "NONE":
+        print(
+            "Embeddings are disabled. Set EMBEDDING_PROVIDER=LOCAL or GOOGLE "
+            "(with a key) before backfilling.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        context = build_context(settings, require_embedder=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not initialize embeddings: {exc}", file=sys.stderr)
+        return 2
+    if context.embedder is None:
+        print("No embedding engine is available; nothing to backfill.", file=sys.stderr)
+        return 2
+    try:
+        result = backfill_embeddings(
+            context.repository,
+            context.embedder,
+            batch_size=args.batch_size,
+        )
+    finally:
+        context.repository.close()
+    parts = [
+        f"embedded {result['records']} record(s) in {result['files']} file(s)",
+        f"{result['missing_files']} file(s) had missing vectors",
+    ]
+    if result["skipped"]:
+        parts.append(f"{result['skipped']} empty record(s) skipped")
+    if result.get("unassigned"):
+        parts.append(f"{result['unassigned']} record(s) without source_path left as-is")
+    print("; ".join(parts))
+    return 0
+
+
 def cmd_status(settings: Settings, args: argparse.Namespace) -> int:
     state, _ = _build(settings)
     stats = state.stats()
@@ -263,11 +302,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--force", action="store_true")
     p_scan.set_defaults(func=cmd_scan)
 
-    sub.add_parser("watch", help="watch inbox and enqueue (no processing)").set_defaults(func=cmd_watch)
+    sub.add_parser(
+        "watch", help="watch inbox and enqueue (no processing)"
+    ).set_defaults(func=cmd_watch)
 
     sub.add_parser("worker", help="process queued items").set_defaults(func=cmd_worker)
 
     sub.add_parser("run", help="watch + process").set_defaults(func=cmd_run)
+
+    p_backfill = sub.add_parser(
+        "backfill-embeddings",
+        help="embed records indexed while embeddings were disabled",
+    )
+    p_backfill.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="records per embedding batch (default: 64)",
+    )
+    p_backfill.set_defaults(func=cmd_backfill_embeddings)
 
     p_status = sub.add_parser("status", help="show queue stats")
     p_status.add_argument("--failed", action="store_true", help="list failed records with errors")

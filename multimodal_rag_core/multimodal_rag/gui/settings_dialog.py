@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from multimodal_rag.config import (
     EMBEDDINGGEMMA_SPECS,
     KNOWN_EMBEDDING_DIMS,
+    Settings,
     get_settings,
 )
 
@@ -28,7 +29,8 @@ logger = logging.getLogger(__name__)
 ENUM_CHOICES = {
     "GUI_THEME": ["Midnight", "Graphite", "Ocean", "Daylight"],
     "SYSTEM_MODE": ["DOC_ONLY_RAG", "MULTI_MODAL_RAG"],
-    "SEARCH_MODE": ["auto", "hybrid", "summary", "chunk"],
+    "SEARCH_MODE": ["auto", "hybrid", "summary", "chunk", "keyword"],
+    "KEYWORD_EXPANSION": ["OFF", "CORPUS", "SYNONYMS", "CORPUS+SYNONYMS"],
     "TYPO_CORRECTION": ["LOCAL", "LLM", "OFF"],
     "SUMMARY_PROVIDER": ["LOCAL", "LLM", "AUTO"],
     "SUMMARY_ALGORITHM": ["SEMANTIC_LEXRANK", "FREQUENCY"],
@@ -37,7 +39,7 @@ ENUM_CHOICES = {
     "SUMMARY_INCLUDE_IMAGES": ["true", "false"],
     "SUMMARY_FALLBACK_TO_LLM": ["true", "false"],
     "ACTIVE_DB_ENGINE": ["POSTGRES", "LANCEDB"],
-    "EMBEDDING_PROVIDER": ["GOOGLE", "LOCAL"],
+    "EMBEDDING_PROVIDER": ["GOOGLE", "LOCAL", "NONE"],
     "LLM_PROVIDER": ["DEEPSEEK", "GEMINI", "OPENAI", "ANTHROPIC", "XAI", "OLLAMA", "LOCAL"],
     "VLM_PROVIDER": ["GEMINI", "DEEPSEEK", "OPENAI", "ANTHROPIC", "XAI", "OLLAMA", "NONE", "LOCAL"],
     "VLM_FALLBACK_PROVIDER": [
@@ -60,6 +62,10 @@ SECTIONS: list[tuple[str, list[str]]] = [
             "GUI_THEME",
             "SYSTEM_MODE",
             "SEARCH_MODE",
+            "SEARCH_TOP_K",
+            "ANSWER_TOP_K",
+            "KEYWORD_EXPANSION",
+            "KEYWORD_EXPANSION_TERMS",
             "TYPO_CORRECTION",
             "ACTIVE_DB_ENGINE",
         ],
@@ -134,6 +140,7 @@ SECTIONS: list[tuple[str, list[str]]] = [
 #: is what gets saved.
 MODEL_PRESETS: dict[str, dict[str, list[str]]] = {
     "EMBEDDING_MODEL": {
+        "NONE": [],
         "GOOGLE": ["models/gemini-embedding-001", "models/text-embedding-004"],
         "LOCAL": [
             "sentence-transformers/all-MiniLM-L6-v2",
@@ -274,8 +281,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
         note = QLabel(
-            "Saves to .env. The app will not restart on its own — close and "
-            "reopen it to apply changes.",
+            "Saves to .env and applies immediately. DB switches auto-copy "
+            "missing vectors when state.db is shared; storage-path changes "
+            "still need a restart.",
             self,
         )
         note.setWordWrap(True)
@@ -300,18 +308,17 @@ class SettingsDialog(QDialog):
     def _fresh_settings():
         """Re-read .env from disk so external edits show up in the dialog.
 
-        The running backend keeps using its startup settings until restart
-        (the dialog already says so), but what is *displayed* must match the
-        file — otherwise an edit made in Notepad looks ignored. If the file is
-        currently invalid, fall back to the startup values instead of crashing.
+        The main window also watches the file and applies changes live, but
+        what is *displayed* here must match the file — otherwise an edit made
+        in Notepad looks ignored. If the file is currently invalid, fall back
+        to the startup values instead of crashing.
         """
         try:
             previous = get_settings()
         except Exception:  # noqa: BLE001
             previous = None
         try:
-            get_settings.cache_clear()
-            return get_settings()
+            return Settings()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Settings re-read failed, showing startup values: %s", exc)
             if previous is not None:

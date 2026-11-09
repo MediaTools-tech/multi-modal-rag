@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 from multimodal_rag.core.models import VectorRecord
 from multimodal_rag.ingestion.state import FileRecord
@@ -92,31 +92,34 @@ def _index_chunks(
 ) -> str:
     if not chunks:
         return f"no content extracted from {path.name}"
-    if context.embedder is None:
-        raise RuntimeError(
-            "Embedding engine is not configured. Set EMBEDDING_PROVIDER/GOOGLE_API_KEY "
-            "in .env and restart."
-        )
 
     settings = context.settings
     meta = _meta(path, record, file_type)
     records = [_to_record(chunk, meta, len(chunks)) for chunk in chunks]
 
-    vectors = context.embedder.embed_texts([item.content for item in records])
-    if len(vectors) != len(records):
-        raise RuntimeError(
-            f"Embedding count mismatch for {path.name}: {len(records)} chunk(s) "
-            f"but {len(vectors)} vector(s) returned; refusing to index partial data."
+    if context.embedder is not None:
+        vectors = context.embedder.embed_texts([item.content for item in records])
+        if len(vectors) != len(records):
+            raise RuntimeError(
+                f"Embedding count mismatch for {path.name}: {len(records)} chunk(s) "
+                f"but {len(vectors)} vector(s) returned; refusing to index partial data."
+            )
+        for item, vector in zip(records, vectors, strict=False):
+            item.vector = vector
+        if not records:
+            return f"embedding produced no vectors for {path.name}"
+    else:
+        logger.info(
+            "Indexing %s without embeddings; keyword search will work and "
+            "vectors can be backfilled later",
+            path.name,
         )
-    for item, vector in zip(records, vectors):
-        item.vector = vector
-    if not records:
-        return f"embedding produced no vectors for {path.name}"
 
     if settings.ENABLE_DOCUMENT_SUMMARIES:
         summary = context.summarizer.build_summary_record(records)
         if summary is not None:
-            summary.vector = context.embedder.embed_texts([summary.content])[0]
+            if context.embedder is not None:
+                summary.vector = context.embedder.embed_texts([summary.content])[0]
             records.append(summary)
 
     context.repository.delete_by_path(meta["source_path"])
@@ -124,8 +127,9 @@ def _index_chunks(
     # Index refresh is deferred: the worker flushes reindex() once the queue
     # drains (or on stop), so a backfill rebuilds the LanceDB index once, not
     # once per file. Postgres reindex() is a no-op.
-    logger.info("Indexed %s records for %s", inserted, path.name)
-    return f"indexed {inserted} record(s) for {path.name}"
+    mode = "with embeddings" if context.embedder is not None else "keyword-only"
+    logger.info("Indexed %s records for %s (%s)", inserted, path.name, mode)
+    return f"indexed {inserted} record(s) for {path.name} ({mode})"
 
 
 def _make_document_handler(context: PipelineContext) -> Handler:
@@ -190,7 +194,7 @@ def _make_video_handler(context: PipelineContext) -> Handler:
             descriptions = context.vlm.describe_frames(
                 [(frame.timestamp, frame.jpeg) for frame in frames]
             )
-            for frame, description in zip(frames, descriptions):
+            for frame, description in zip(frames, descriptions, strict=False):
                 if not description:
                     continue
                 chunks.append(

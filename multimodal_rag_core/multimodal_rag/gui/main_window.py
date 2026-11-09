@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QMainWindow,
     QMessageBox,
@@ -14,18 +16,47 @@ from PySide6.QtWidgets import (
     QStatusBar,
 )
 
-from multimodal_rag.config import get_settings
+from multimodal_rag.config import SearchMode, Settings, get_settings
 from multimodal_rag.gui.chat_panel import ChatPanel
 from multimodal_rag.gui.ingest_panel import IngestPanel
 from multimodal_rag.gui.preview_panel import PreviewPanel
 from multimodal_rag.gui.services import BackendService
 from multimodal_rag.gui.settings_dialog import SettingsDialog
-from multimodal_rag.gui.workers import InitWorker, SearchWorker, WarmupWorker
+from multimodal_rag.gui.theme import app_qss, get_palette
+from multimodal_rag.gui.workers import (
+    BackfillWorker,
+    InitWorker,
+    SearchWorker,
+    WarmupWorker,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
+    HOT_QUERY_KEYS = frozenset(
+        {
+            "SEARCH_MODE",
+            "SEARCH_TOP_K",
+            "ANSWER_TOP_K",
+            "KEYWORD_EXPANSION",
+            "KEYWORD_EXPANSION_TERMS",
+            "TYPO_CORRECTION",
+        }
+    )
+    RESTART_REQUIRED_KEYS = frozenset(
+        {
+            "LANCEDB_DIR",
+            "STATE_DB_PATH",
+            "DATA_DIR",
+            "INBOX_DIR",
+            "PROCESSING_DIR",
+            "PROCESSED_DIR",
+            "FAILED_DIR",
+            "VLM_CACHE_DIR",
+        }
+    )
+
     def __init__(self) -> None:
         super().__init__()
         self.settings = get_settings()
@@ -37,11 +68,19 @@ class MainWindow(QMainWindow):
         self._init_worker: InitWorker | None = None
         self._warmup_worker: WarmupWorker | None = None
         self._search_worker: SearchWorker | None = None
+        self._backfill_worker: BackfillWorker | None = None
         self._models_warmed = False
+        self._env_path = Path(self.settings.app_root) / ".env"
+        self._env_stamp = self._current_env_stamp()
+        self._settings_dialog_open = False
+        self._pending_settings: tuple | None = None
 
         self.setWindowTitle("Multi-Engine Hybrid RAG")
         self.resize(1200, 760)
         self._build_ui()
+        self._env_timer = QTimer(self)
+        self._env_timer.timeout.connect(self._check_env_changes)
+        self._env_timer.start(1000)
         self._start_backend()
 
     def _build_ui(self) -> None:
@@ -65,6 +104,11 @@ class MainWindow(QMainWindow):
         act_add_files.triggered.connect(self._on_add_files)
         act_reset = QAction("Reset index...", self)
         act_reset.triggered.connect(self._on_reset_index)
+        self.act_backfill = QAction("Backfill embeddings...", self)
+        self.act_backfill.setToolTip(
+            "Embed records that were indexed while embeddings were disabled"
+        )
+        self.act_backfill.triggered.connect(self._on_backfill_embeddings)
         act_ffmpeg = QAction("Download ffmpeg...", self)
         act_ffmpeg.setToolTip("Fetch a static ffmpeg for video audio extraction")
         act_ffmpeg.triggered.connect(self._download_ffmpeg)
@@ -72,7 +116,14 @@ class MainWindow(QMainWindow):
         act_settings.triggered.connect(self._on_settings)
         act_exit = QAction("Exit", self)
         act_exit.triggered.connect(self.close)
-        for action in (act_add, act_add_files, act_reset, act_ffmpeg, act_exit):
+        for action in (
+            act_add,
+            act_add_files,
+            act_reset,
+            self.act_backfill,
+            act_ffmpeg,
+            act_exit,
+        ):
             file_menu.addAction(action)
         # Top-level "Settings" in the same menu-bar row as File, so it is
         # immediately visible (no extra toolbar row).
@@ -148,23 +199,16 @@ class MainWindow(QMainWindow):
                 or "EMBEDDING_MODEL_UNSUPPORTED" in init_error
             ):
                 self._on_embedding_model_blocked(init_error)
-                self._check_index_fingerprint()
-                self._refresh(reconcile=True)
-                return
-            self.ingest_panel.set_warning(
-                "No embedding engine configured — indexing and search are disabled until "
-                "you set keys and restart."
-            )
-            self.chat_panel.set_backend_state(
-                False, "Embeddings not configured — set keys in Settings and restart."
-            )
-            self.chat_panel.add_assistant_message(
-                "Backend is up, but embeddings are not configured. Open Settings, set "
-                "GOOGLE_API_KEY (or EMBEDDING_PROVIDER=LOCAL), then restart."
-            )
+            elif init_error and not self.service.embedding_disabled:
+                self.chat_panel.add_assistant_message(
+                    "Embeddings unavailable, so keyword search will be used: "
+                    f"{init_error}"
+                )
+            self._enter_keyword_only()
             self._check_index_fingerprint()
             self._refresh(reconcile=True)
             return
+        self.ingest_panel.set_warning("")
         # Keep querying disabled until both models are loaded and warmed up.
         self.chat_panel.set_backend_state(
             False, "Loading and warming up local models..."
@@ -174,6 +218,25 @@ class MainWindow(QMainWindow):
         self._warmup_worker.start()
         self._check_index_fingerprint()
         self._refresh(reconcile=True)
+
+    def _enter_keyword_only(self) -> None:
+        """Keep the app usable when no embedding engine is configured."""
+        self._models_warmed = True
+        self.chat_panel.set_mode("keyword")
+        self.chat_panel.set_backend_state(True)
+        self.chat_panel.focus_input()
+        self.ingest_panel.set_warning(
+            "No embedding engine — indexing stores chunks/summaries for keyword "
+            "search only. Enable embeddings later and use File → Backfill embeddings."
+        )
+        if not getattr(self, "_greeted", False):
+            self._greeted = True
+            self.chat_panel.add_assistant_message(
+                "Keyword-only search is ready. Files are indexed and searchable "
+                "without embeddings; vector/hybrid modes are disabled until you "
+                "configure an embedding model. Existing unembedded records can be "
+                "embedded later with File → Backfill embeddings."
+            )
 
     @Slot(str)
     def _on_warmup_done(self, error: str) -> None:
@@ -198,6 +261,19 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_assistant_message(
                 "Ready. Ask a question about your files, or add a files/folder "
                 "on the left to index one."
+            )
+        self._notify_missing_vectors()
+
+    def _notify_missing_vectors(self) -> None:
+        try:
+            missing = int(self.service.stats().get("repo", {}).get("missing_vectors", 0) or 0)
+        except Exception:  # noqa: BLE001
+            return
+        if missing:
+            self.chat_panel.add_assistant_message(
+                f"{missing} indexed record(s) have no embeddings yet. "
+                "Use File → Backfill embeddings to enable vector/hybrid search "
+                "for them."
             )
 
     def _on_embedding_model_blocked(self, error: str) -> None:
@@ -311,14 +387,12 @@ class MainWindow(QMainWindow):
         try:
             result = self.service.reset_index()
         finally:
-            self.service.restart_worker()
+            self.service.restart_ingestion()
         self.preview_panel.clear()
         self._refresh()
         # The backend stayed up, but only re-enable queries if the models were
-        # already warmed successfully.
-        self.chat_panel.set_backend_state(
-            self.service.embedder_ready and self._models_warmed
-        )
+        # already warmed successfully (or keyword-only mode is active).
+        self.chat_panel.set_backend_state(self._models_warmed)
         self.chat_panel.add_assistant_message(
             f"Index reset: {result['vectors']} vector record(s) and "
             f"{result['queue']} queue entr(ies) deleted. Re-ingest your files to start fresh."
@@ -345,10 +419,12 @@ class MainWindow(QMainWindow):
             stats = self.service.stats()
             repo = stats.get("repo", {})
             queue = stats.get("queue", {})
+            missing = int(repo.get("missing_vectors", 0) or 0)
+            missing_note = f" | missing embeddings: {missing}" if missing else ""
             self.statusBar().showMessage(
                 f"Mode: {self.settings.SYSTEM_MODE.value} | "
-                f"{repo.get('total_files', 0)} files / {repo.get('total_records', 0)} records | "
-                f"queue: {queue}"
+                f"{repo.get('total_files', 0)} files / {repo.get('total_records', 0)} records"
+                f"{missing_note} | queue: {queue}"
             )
             records = self.service.queue_records()
             if reconcile:
@@ -381,6 +457,48 @@ class MainWindow(QMainWindow):
             "DB engines without mrag-db-copy."
         )
 
+    def _on_backfill_embeddings(self) -> None:
+        if self._backfill_worker is not None:
+            return
+        if not self.service.embedder_ready:
+            self.chat_panel.add_assistant_message(
+                "Backfill needs an embedding model. Set EMBEDDING_PROVIDER=LOCAL "
+                "(or GOOGLE with a key), restart, then try again."
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Backfill embeddings",
+            "Embed all indexed records that currently have no vectors?\n\n"
+            "Indexing pauses while this runs. Existing vectors are kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.service.stop_worker()
+        self.chat_panel.set_backend_state(False, "Backfilling embeddings...")
+        self.act_backfill.setEnabled(False)
+        self._backfill_worker = BackfillWorker(self.service)
+        self._backfill_worker.done.connect(self._on_backfill_done)
+        self._backfill_worker.start()
+
+    @Slot(object, str)
+    def _on_backfill_done(self, result, error: str) -> None:
+        self._backfill_worker = None
+        self.act_backfill.setEnabled(True)
+        self.service.restart_ingestion()
+        self.chat_panel.set_backend_state(True)
+        self.chat_panel.focus_input()
+        if error:
+            self.chat_panel.add_assistant_message(f"Embedding backfill failed: {error}")
+        else:
+            self.chat_panel.add_assistant_message(
+                f"Embedding backfill complete: {result.get('records', 0)} record(s) "
+                f"in {result.get('files', 0)} file(s) embedded."
+            )
+        self._refresh(reconcile=True)
+
     def _update_session_usage(self) -> None:
         from multimodal_rag.utils.token_tracker import TokenTracker
 
@@ -388,9 +506,20 @@ class MainWindow(QMainWindow):
             TokenTracker.format_usage(self.service.tracker.snapshot())
         )
 
+    def _backend_ready_for_enqueue(self) -> bool:
+        if self.service.queue is not None and self._pending_settings is None:
+            return True
+        QMessageBox.information(
+            self,
+            "Backend is loading",
+            "The backend is still initializing, switching databases, or "
+            "applying saved settings. Wait for it to finish, then add files again.",
+        )
+        return False
+
     def _on_add_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select a folder to index")
-        if not folder:
+        if not folder or not self._backend_ready_for_enqueue():
             return
         try:
             count = self.service.enqueue(folder)
@@ -418,7 +547,7 @@ class MainWindow(QMainWindow):
         files, _ = QFileDialog.getOpenFileNames(
             self, "Select file(s) to index", "", self._supported_files_filter()
         )
-        if not files:
+        if not files or not self._backend_ready_for_enqueue():
             return
         try:
             count = 0
@@ -440,7 +569,17 @@ class MainWindow(QMainWindow):
     def _on_query(self, query: str) -> None:
         if self._search_worker is not None:
             return
-        if not self._models_warmed or not self.service.embedder_ready:
+        if not self._models_warmed:
+            return
+        mode = self.chat_panel.active_mode()
+        if (
+            not self.service.embedder_ready
+            and mode not in (SearchMode.KEYWORD.value, SearchMode.AUTO.value)
+        ):
+            self.chat_panel.add_assistant_message(
+                "Vector search needs an embedding model. Choose keyword (or auto) "
+                "mode, or configure embeddings and restart."
+            )
             return
         self.chat_panel.show_loading()
         self.chat_panel.set_busy(True)
@@ -500,6 +639,10 @@ class MainWindow(QMainWindow):
             if requested == "auto" and self.service.last_mode_used == "hybrid":
                 text = (
                     "_Auto: chunk was inconclusive, retried with hybrid._\n\n" + text
+                )
+            elif requested == "auto" and self.service.last_mode_used == "keyword":
+                text = (
+                    "_Auto: embeddings unavailable, used keyword search._\n\n" + text
                 )
         elif results:
             lines = [f"{r.score:.3f} — {r.record.filename}" for r in results[:5]]
@@ -671,39 +814,184 @@ class MainWindow(QMainWindow):
             )
 
     def _on_settings(self) -> None:
+        before = self.settings
         dialog = SettingsDialog(self)
-        before = dialog._values()
-        if dialog.exec() != SettingsDialog.DialogCode.Accepted:
+        self._settings_dialog_open = True
+        try:
+            accepted = dialog.exec() == SettingsDialog.DialogCode.Accepted
+        finally:
+            self._settings_dialog_open = False
+        if not accepted:
             return
-        after = dialog._values()
-        changed = {key for key in after if before.get(key) != after[key]}
+        self._env_stamp = self._current_env_stamp()
+        try:
+            new_settings = Settings()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "Settings could not be reloaded",
+                f"The saved .env is not valid:\n{exc}\n\n"
+                "Fix it in the Settings dialog or a text editor.",
+            )
+            return
+        changed = self._changed_setting_fields(before, new_settings)
         if not changed:
             self.statusBar().showMessage("No settings changed.", 4000)
             return
-        # SEARCH_MODE takes effect immediately: the chat dropdown passes it
-        # explicitly on every query. Everything else is read at backend startup.
-        saved_mode = after.get("SEARCH_MODE", "")
-        if saved_mode:
-            self.chat_panel.set_mode(saved_mode)
-        if changed == {"SEARCH_MODE"}:
+        self._queue_settings_apply(new_settings, changed, "Settings")
+
+    def _current_env_stamp(self):
+        try:
+            stat = self._env_path.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    @staticmethod
+    def _changed_setting_fields(before, after) -> set[str]:
+        old = before.model_dump()
+        new = after.model_dump()
+        return {
+            key for key in old.keys() | new.keys() if old.get(key) != new.get(key)
+        }
+
+    def _check_env_changes(self) -> None:
+        if self._settings_dialog_open:
+            return
+        stamp = self._current_env_stamp()
+        if stamp == self._env_stamp:
+            return
+        self._env_stamp = stamp
+        if stamp is None:
+            return
+        try:
+            new_settings = Settings()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not reload settings from %s: %s", self._env_path, exc)
+            self.statusBar().showMessage(f".env reload failed: {exc}", 8000)
+            return
+        if new_settings == self.settings:
+            return
+        changed = self._changed_setting_fields(self.settings, new_settings)
+        if changed:
+            self._queue_settings_apply(new_settings, changed, ".env")
+
+    def _queue_settings_apply(self, new_settings, changed: set[str], source: str) -> None:
+        if changed & self.RESTART_REQUIRED_KEYS:
             self.statusBar().showMessage(
-                "Search mode applied immediately; no restart needed.", 5000
+                "Storage-path settings changed; restart the app to apply them.",
+                8000,
             )
             return
-        choice = QMessageBox.question(
-            self,
-            "Restart required",
-            "Settings saved to .env.\n\n"
-            "The app needs to be restarted for the new settings to take effect.\n\n"
-            "Exit app?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+        if self._settings_busy():
+            self._pending_settings = (new_settings, changed, source)
+            self.statusBar().showMessage(
+                "Settings saved; applying when the current task finishes.", 6000
+            )
+            QTimer.singleShot(500, self._maybe_apply_pending_settings)
+            return
+        self._apply_settings(new_settings, changed, source)
+
+    def _settings_busy(self) -> bool:
+        workers = (
+            self._init_worker,
+            self._warmup_worker,
+            self._search_worker,
+            self._backfill_worker,
         )
-        if choice == QMessageBox.StandardButton.Yes:
-            self.close()
+        return any(worker is not None and worker.isRunning() for worker in workers)
+
+    def _maybe_apply_pending_settings(self) -> None:
+        if self._pending_settings is None:
+            return
+        if self._settings_busy():
+            QTimer.singleShot(500, self._maybe_apply_pending_settings)
+            return
+        new_settings, changed, source = self._pending_settings
+        self._pending_settings = None
+        self._apply_settings(new_settings, changed, source)
+
+    def _apply_settings(
+        self, new_settings, changed: set[str], source: str
+    ) -> None:
+        get_settings.cache_clear()
+        if "GUI_THEME" in changed:
+            self._apply_theme(new_settings.GUI_THEME.value)
+        if changed <= self.HOT_QUERY_KEYS | {"GUI_THEME"}:
+            self.settings = new_settings
+            self.service.settings = new_settings
+            if self.service.context is not None:
+                self.service.context.settings = new_settings
+            if "SEARCH_MODE" in changed:
+                self.chat_panel.set_mode(new_settings.SEARCH_MODE.value)
+            self._update_path_tooltips()
+            self.statusBar().showMessage(f"Settings applied from {source}.", 6000)
+            return
+        if "ACTIVE_DB_ENGINE" in changed:
+            engine = new_settings.ACTIVE_DB_ENGINE
+            self.statusBar().showMessage(
+                f"Switching database to {engine.value if engine else 'default'}..."
+            )
+        self._reload_backend(new_settings)
+        self.statusBar().showMessage(
+            f"Settings applied from {source}; backend reloaded.", 8000
+        )
+
+    def _reload_backend(self, new_settings) -> None:
+        logger.info(
+            "Reloading backend: %s -> %s, embeddings=%s",
+            self.settings.ACTIVE_DB_ENGINE,
+            new_settings.ACTIVE_DB_ENGINE,
+            new_settings.EMBEDDING_PROVIDER.value,
+        )
+        self._models_warmed = False
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        old_service = self.service
+        try:
+            old_service.stop_worker()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not stop previous ingestion worker: %s", exc)
+        repository = old_service.context.repository if old_service.context else None
+        if repository is not None:
+            try:
+                repository.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not close previous repository: %s", exc)
+        self.settings = new_settings
+        self.service = BackendService(new_settings)
+        self._stale_ids = set()
+        self._update_path_tooltips()
+        self.chat_panel.set_mode(new_settings.SEARCH_MODE.value)
+        self._start_backend()
+
+    def _apply_theme(self, theme: str) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(app_qss(get_palette(theme)))
+        for panel in (self.ingest_panel, self.chat_panel, self.preview_panel):
+            apply_theme = getattr(panel, "apply_theme", None)
+            if apply_theme is not None:
+                apply_theme(theme)
+
+    def _update_path_tooltips(self) -> None:
+        self.ingest_panel.btn_open_inbox.setToolTip(
+            f"Open the inbox folder in your file manager:\n{self.settings.INBOX_DIR}"
+        )
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._backfill_worker is not None and self._backfill_worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Backfill in progress",
+                "Embedding backfill is still running. Wait for it to finish before "
+                "closing the application.",
+            )
+            event.ignore()
+            return
         try:
+            self._env_timer.stop()
             self.service.stop_worker()
         except Exception:  # noqa: BLE001
             pass

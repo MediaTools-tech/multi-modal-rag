@@ -94,11 +94,17 @@ class ChatPanel(QWidget):
         self.mode_combo.addItem("hybrid", "hybrid")
         self.mode_combo.addItem("summary", "summary")
         self.mode_combo.addItem("chunk", "chunk")
+        self.mode_combo.addItem("keyword", "keyword")
         # Default to the .env configured mode so the chat dropdown and the
-        # Settings panel stay in sync (previously this always opened on "auto",
-        # so queries ran as auto even when SEARCH_MODE=hybrid in .env).
+        # Settings panel stay in sync. Without an embedding engine only
+        # keyword retrieval can run, so show that from the start.
         try:
-            default_mode = get_settings().SEARCH_MODE.value
+            settings = get_settings()
+            default_mode = (
+                "keyword"
+                if settings.EMBEDDING_PROVIDER.value == "NONE"
+                else settings.SEARCH_MODE.value
+            )
         except Exception:  # noqa: BLE001
             default_mode = "auto"
         idx = self.mode_combo.findData(default_mode)
@@ -109,7 +115,9 @@ class ChatPanel(QWidget):
             "retry once with hybrid (provenance shown with the answer).\n"
             "hybrid: chunks + summaries + keywords, fused and reranked (best recall).\n"
             "summary: one file-level match per file (which files are about this?).\n"
-            "chunk: pure vector search over passages, no keywords (fast, literal)."
+            "chunk: pure vector search over passages, no keywords (fast, literal).\n"
+            "keyword: full-text/BM25 only; no query embedding or reranker. "
+            "Optional corpus/synonym expansion (defaults to corpus when unset)."
         )
         top.addWidget(self.mode_combo)
         self.answer_check = QCheckBox("LLM answer", self)
@@ -225,12 +233,62 @@ class ChatPanel(QWidget):
         if idx >= 0:
             self.mode_combo.setCurrentIndex(idx)
 
+    def apply_theme(self, theme: str) -> None:
+        self.palette = get_palette(theme)
+        p = self.palette
+        self.scroll.setStyleSheet(
+            f"background-color: {p.surface_bg}; border: none; border-radius: 8px;"
+        )
+        for widget in self.scroll_widget.findChildren(QWidget):
+            style = widget.property("mrag_style")
+            if style == "user_bubble":
+                widget.setStyleSheet(
+                    f"background-color: {p.user_bubble_bg}; color: {p.user_bubble_text}; "
+                    "border-radius: 12px; padding: 10px;"
+                )
+            elif style == "user_text":
+                widget.setStyleSheet(f"color: {p.user_bubble_text};")
+            elif style == "assistant_bubble":
+                widget.setStyleSheet(
+                    f"background-color: {p.assistant_bubble_bg}; "
+                    f"color: {p.assistant_bubble_text}; border-radius: 12px; padding: 12px;"
+                )
+            elif style == "assistant_text":
+                widget.setStyleSheet(f"color: {p.assistant_bubble_text};")
+            elif style == "muted":
+                widget.setStyleSheet(
+                    f"color: {p.text_muted}; font-size: 10px; padding-top: 2px;"
+                )
+            elif style == "card":
+                widget.setStyleSheet(
+                    f"background-color: {p.card_bg}; border-radius: 6px; padding: 8px;"
+                )
+            elif style == "badge":
+                widget.setStyleSheet(
+                    f"background-color: {p.badge_bg}; color: {p.badge_text}; "
+                    "border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;"
+                )
+            elif style == "accent_badge":
+                widget.setStyleSheet(
+                    f"background-color: {p.accent}; color: {p.accent_text}; "
+                    "border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;"
+                )
+            elif style == "link":
+                widget.setStyleSheet(
+                    f"color: {p.link}; text-decoration: underline; font-weight: bold;"
+                )
+            elif style == "muted_small":
+                widget.setStyleSheet(f"color: {p.text_muted}; font-size: 11px;")
+            elif style == "link_italic":
+                widget.setStyleSheet(f"color: {p.link}; font-style: italic;")
+
     def answer_enabled(self) -> bool:
         return self.answer_check.isChecked()
 
     def add_user_message(self, text: str) -> None:
         p = self.palette
         bubble = QFrame()
+        bubble.setProperty("mrag_style", "user_bubble")
         bubble.setStyleSheet(
             f"background-color: {p.user_bubble_bg}; color: {p.user_bubble_text}; "
             "border-radius: 12px; padding: 10px;"
@@ -238,6 +296,7 @@ class ChatPanel(QWidget):
         bubble.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         inner = QVBoxLayout(bubble)
         label = QLabel(text)
+        label.setProperty("mrag_style", "user_text")
         label.setWordWrap(True)
         # Selectable so the user can copy their own prompt.
         label.setTextInteractionFlags(
@@ -262,6 +321,7 @@ class ChatPanel(QWidget):
     ) -> None:
         p = self.palette
         bubble = QFrame()
+        bubble.setProperty("mrag_style", "assistant_bubble")
         bubble.setStyleSheet(
             f"background-color: {p.assistant_bubble_bg}; "
             f"color: {p.assistant_bubble_text}; border-radius: 12px; padding: 12px;"
@@ -270,6 +330,7 @@ class ChatPanel(QWidget):
         inner.setSpacing(8)
 
         body = QLabel(linkify_bare_urls(text or "(no answer)"))
+        body.setProperty("mrag_style", "assistant_text")
         body.setWordWrap(True)
         body.setTextFormat(Qt.TextFormat.MarkdownText)
         # Selectable + clickable links (was non-interactive, so text behaved like an image).
@@ -315,11 +376,13 @@ class ChatPanel(QWidget):
             if divider_pending and not is_cited:
                 divider_pending = False
                 divider = QLabel("Other matches (not cited by the answer)")
+                divider.setProperty("mrag_style", "muted")
                 divider.setStyleSheet(
                     f"color: {p.text_muted}; font-size: 10px; padding-top: 2px;"
                 )
                 inner.addWidget(divider)
             card = QFrame()
+            card.setProperty("mrag_style", "card")
             card.setStyleSheet(
                 f"background-color: {p.card_bg}; border-radius: 6px; padding: 8px;"
             )
@@ -337,6 +400,7 @@ class ChatPanel(QWidget):
                     f"{int(max(result.score, 0.0) * 100)}%"
                 )
             badge = QLabel(badge_text)
+            badge.setProperty("mrag_style", "badge")
             badge.setStyleSheet(
                 f"background-color: {p.badge_bg}; color: {p.badge_text}; "
                 "border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;"
@@ -344,6 +408,7 @@ class ChatPanel(QWidget):
             header.addWidget(badge)
             if is_cited:
                 tag = QLabel("cited by answer")
+                tag.setProperty("mrag_style", "accent_badge")
                 tag.setStyleSheet(
                     f"background-color: {p.accent}; color: {p.accent_text}; "
                     "border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;"
@@ -355,6 +420,7 @@ class ChatPanel(QWidget):
                 else ""
             )
             link = ClickableLabel(f"{record.filename}{stamp}", item["key"], p.link)
+            link.setProperty("mrag_style", "link")
             link.clicked.connect(lambda key: self.result_clicked.emit(key))
             header.addWidget(link)
             header.addStretch()
@@ -362,6 +428,7 @@ class ChatPanel(QWidget):
             snippet = (record.content or "").replace("\n", " ")
             snippet = snippet[:160] + "..." if len(snippet) > 160 else snippet
             snip = QLabel(snippet)
+            snip.setProperty("mrag_style", "muted_small")
             snip.setWordWrap(True)
             snip.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
@@ -387,6 +454,7 @@ class ChatPanel(QWidget):
         layout = QHBoxLayout(self._loading)
         layout.setContentsMargins(15, 5, 0, 5)
         label = QLabel("Searching...")
+        label.setProperty("mrag_style", "link_italic")
         label.setStyleSheet(f"color: {self.palette.link}; font-style: italic;")
         layout.addWidget(label)
         self.scroll_layout.addWidget(self._loading)

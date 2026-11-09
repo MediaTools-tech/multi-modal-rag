@@ -3,7 +3,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from multimodal_rag.config import DBEngine, IngestionMode, SearchMode, Settings, get_settings
+from multimodal_rag.config import (
+    DBEngine,
+    EmbeddingProvider,
+    IngestionMode,
+    SearchMode,
+    Settings,
+    get_settings,
+)
 from multimodal_rag.ingestion.queue import IngestQueue
 from multimodal_rag.ingestion.state import (
     INDEX_FINGERPRINT_KEYS,
@@ -52,11 +59,16 @@ class BackendService:
     def initialize(self) -> None:
         self.engine_sync = {}
         self.engine_sync_error = None
+        self.init_error = None
         self.settings.ensure_data_dirs()
         # Share one tracker so session totals include embeddings, VLM, summaries
         # and answers (build_context would otherwise use its own throwaway one).
         self.context = build_context(self.settings, require_embedder=False, tracker=self.tracker)
-        if self.context is not None and self.context.embedder is None:
+        if (
+            self.context is not None
+            and self.context.embedder is None
+            and self.settings.EMBEDDING_PROVIDER is not EmbeddingProvider.NONE
+        ):
             try:
                 from multimodal_rag.pipeline.embedding import get_embedding_engine
 
@@ -87,15 +99,7 @@ class BackendService:
         )
         # Auto-watch the inbox (same mechanism the CLI `run` uses) so files
         # dropped into INBOX_DIR are picked up without pressing Scan Inbox.
-        if self.settings.INGESTION_MODE is IngestionMode.WATCH:
-            self.watcher = InboxWatcher(
-                self.settings.INBOX_DIR,
-                on_file=lambda path: self.queue.enqueue_path(path),
-                ignore_extensions=self.settings.ingest_ignore_extensions,
-                poll_interval=self.settings.WATCH_POLL_INTERVAL_SEC,
-                on_delete=self._on_source_deleted,
-            )
-            self.watcher.start()
+        self._start_watcher()
 
     def _previous_engine(self) -> str | None:
         """Engine used at the previous startup, with a legacy fingerprint fallback."""
@@ -215,6 +219,24 @@ class BackendService:
     def embedder_ready(self) -> bool:
         return bool(self.context and self.context.embedder is not None)
 
+    @property
+    def embedding_disabled(self) -> bool:
+        return self.settings.EMBEDDING_PROVIDER is EmbeddingProvider.NONE
+
+    def _start_watcher(self) -> None:
+        if self.watcher is not None or self.queue is None:
+            return
+        if self.settings.INGESTION_MODE is not IngestionMode.WATCH:
+            return
+        self.watcher = InboxWatcher(
+            self.settings.INBOX_DIR,
+            on_file=lambda path: self.queue.enqueue_path(path),
+            ignore_extensions=self.settings.ingest_ignore_extensions,
+            poll_interval=self.settings.WATCH_POLL_INTERVAL_SEC,
+            on_delete=self._on_source_deleted,
+        )
+        self.watcher.start()
+
     def start_worker(self) -> None:
         if self.worker is not None:
             self.worker.start()
@@ -228,6 +250,15 @@ class BackendService:
     def restart_worker(self) -> None:
         if self.worker is not None:
             self.worker.restart()
+
+    def restart_ingestion(self) -> None:
+        """Restart watcher + worker after a long exclusive store operation."""
+        if self.watcher is not None:
+            self.watcher.stop()
+            self.watcher = None
+        if self.worker is not None:
+            self.worker.restart()
+        self._start_watcher()
 
     def enqueue(self, path: str | Path) -> int:
         if self.queue is None:
@@ -248,19 +279,25 @@ class BackendService:
         top_k: int | None = None,
         prepared_query: str | None = None,
     ):
-        if self.context is None or self.context.embedder is None:
-            raise RuntimeError(
-                "Embedding engine not configured. Set EMBEDDING_PROVIDER=GOOGLE + "
-                "GOOGLE_API_KEY (or LOCAL + sentence-transformers) and restart."
-            )
+        if self.context is None:
+            raise RuntimeError("Search backend is not initialized.")
         mode = mode or self.settings.SEARCH_MODE.value
         if mode == SearchMode.AUTO.value:
             # Retrieval-only callers get the chunk-first fallback without the
             # answer verdict stage (no LLM spent); answers go through ask().
             results, groups, _ = self.search_auto(query, top_k, prepared_query)
             return results, groups
+        if mode != SearchMode.KEYWORD.value and self.context.embedder is None:
+            raise RuntimeError(
+                "Embedding engine not configured. Use keyword mode "
+                "(EMBEDDING_PROVIDER=NONE), or set EMBEDDING_PROVIDER=GOOGLE + "
+                "GOOGLE_API_KEY (or LOCAL + sentence-transformers) and restart."
+            )
         top_k = top_k or self.settings.SEARCH_TOP_K
-        rerank = self.settings.active_reranker != "NONE"
+        rerank = (
+            mode != SearchMode.KEYWORD.value
+            and self.settings.active_reranker != "NONE"
+        )
         prepared = prepared_query or prepare_query(
             self.settings, self.context.repository, query, self.tracker
         )
@@ -297,11 +334,8 @@ class BackendService:
         Returns (results, groups, mode_used). No LLM call is spent here — the
         abstention-verdict fallback lives in ask(), which has the answer text.
         """
-        if self.context is None or self.context.embedder is None:
-            raise RuntimeError(
-                "Embedding engine not configured. Set EMBEDDING_PROVIDER=GOOGLE + "
-                "GOOGLE_API_KEY (or LOCAL + sentence-transformers) and restart."
-            )
+        if self.context is None:
+            raise RuntimeError("Search backend is not initialized.")
         top_k = top_k or self.settings.SEARCH_TOP_K
         rerank = self.settings.active_reranker != "NONE"
         prepared = prepared_query or prepare_query(
@@ -379,6 +413,17 @@ class BackendService:
             self.last_answer_error = f"{type(exc).__name__}: {exc}"
             return None
 
+    def backfill_embeddings(self) -> dict[str, int]:
+        """Embed records that were indexed in keyword-only mode."""
+        if self.context is None or self.context.embedder is None:
+            raise RuntimeError(
+                "Embeddings are disabled. Set EMBEDDING_PROVIDER=LOCAL/GOOGLE "
+                "with a working model/key, then restart."
+            )
+        from multimodal_rag.ingestion.backfill import backfill_embeddings
+
+        return backfill_embeddings(self.context.repository, self.context.embedder)
+
     def stats(self) -> dict:
         repo_stats: dict = {}
         if self.context and self.context.repository:
@@ -454,7 +499,7 @@ class BackendService:
 
     @staticmethod
     def _fingerprint_value(settings: Settings, key: str) -> str:
-        return fingerprint_of(settings)[key]
+        return fingerprint_of(settings).get(key, "")
 
     def current_fingerprint(self) -> dict:
         return fingerprint_of(self.settings)
@@ -502,7 +547,7 @@ class BackendService:
             shared_diffs = [
                 f"{key}: index has {stored.get(key)!r}, config now {current[key]!r}"
                 for key in INDEX_FINGERPRINT_KEYS
-                if key in stored and stored.get(key) != current[key]
+                if key in stored and key in current and stored.get(key) != current[key]
             ]
             if shared_diffs:
                 return {
@@ -519,7 +564,7 @@ class BackendService:
         diffs = [
             f"{key}: index has {stored.get(key)!r}, config now {current[key]!r}"
             for key in INDEX_FINGERPRINT_KEYS
-            if stored.get(key) != current[key]
+            if key in stored and key in current and stored.get(key) != current[key]
         ]
         return {
             "status": "ok" if not diffs else "mismatch",

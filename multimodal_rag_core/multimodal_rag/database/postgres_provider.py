@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from multimodal_rag.config import Settings
 from multimodal_rag.core.models import SearchResult, VectorRecord
 from multimodal_rag.database.base_interface import DocumentRepository
+from multimodal_rag.search.lexical import numeric_query_variants
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,18 @@ logger = logging.getLogger(__name__)
 def _like_escape(value: str) -> str:
     """Escape LIKE wildcards so folder prefixes match literally."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _plain_keyword_query(query: str) -> bool:
+    """True for multi-word queries without explicit search operators/phrases."""
+    upper = query.upper()
+    return (
+        len(query.split()) > 1
+        and not any(char in query for char in '"()|-!&')
+        and " OR " not in upper
+        and " AND " not in upper
+        and " NOT " not in upper
+    )
 
 
 class PostgresProvider(DocumentRepository):
@@ -102,6 +115,23 @@ class PostgresProvider(DocumentRepository):
                         ) STORED;
                     """
                 )
+                cur.execute(
+                    f"""
+                    ALTER TABLE {self.table}
+                        ADD COLUMN IF NOT EXISTS path_tsv tsvector
+                        GENERATED ALWAYS AS (
+                            to_tsvector(
+                                'simple',
+                                regexp_replace(
+                                    coalesce(source_path, ''),
+                                    '[^[:alnum:]]+',
+                                    ' ',
+                                    'g'
+                                )
+                            )
+                        ) STORED;
+                    """
+                )
                 try:
                     cur.execute(
                         f"CREATE INDEX IF NOT EXISTS {self.table}_embedding_idx "
@@ -125,6 +155,10 @@ class PostgresProvider(DocumentRepository):
                     f"ON {self.table} (source_path);"
                 )
                 cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS {self.table}_path_tsv_idx "
+                    f"ON {self.table} USING gin (path_tsv);"
+                )
+                cur.execute(
                     f"CREATE INDEX IF NOT EXISTS {self.table}_hash_idx "
                     f"ON {self.table} (file_hash);"
                 )
@@ -139,12 +173,22 @@ class PostgresProvider(DocumentRepository):
             actual = row["type"] if row else None
             expected = f"vector({self.dim})"
             if actual and actual != expected:
-                raise ValueError(
-                    f"Table {self.table!r} has embedding {actual}, configured "
-                    f"EMBEDDING_DIMENSION expects {expected}. Reset the index "
-                    f"(GUI: File -> Reset index... / CLI: mrag-ingest reset-index) "
-                    f"to rebuild the table, or use a new DB_TABLE_NAME."
-                )
+                if self.settings.EMBEDDING_PROVIDER.value == "NONE":
+                    # Keyword-only mode never reads/writes the vector column, so
+                    # an old dimension must not block startup. Restarting with
+                    # embeddings enabled will hit this guard and require a reset.
+                    logger.warning(
+                        "Table %s has embedding %s but keyword-only mode ignores it",
+                        self.table,
+                        actual,
+                    )
+                else:
+                    raise ValueError(
+                        f"Table {self.table!r} has embedding {actual}, configured "
+                        f"EMBEDDING_DIMENSION expects {expected}. Reset the index "
+                        f"(GUI: File -> Reset index... / CLI: mrag-ingest reset-index) "
+                        f"to rebuild the table, or use a new DB_TABLE_NAME."
+                    )
         finally:
             conn.close()
         self._vocab_cache = None
@@ -156,7 +200,7 @@ class PostgresProvider(DocumentRepository):
         rows = [
             (
                 record.id,
-                record.vector,
+                record.vector if record.vector is not None and len(record.vector) > 0 else None,
                 record.content,
                 record.record_type,
                 record.source_path,
@@ -221,7 +265,7 @@ class PostgresProvider(DocumentRepository):
         record_types: list[str] | None = None,
         folder_prefix: str | None = None,
     ) -> list[SearchResult]:
-        where: list[str] = []
+        where: list[str] = ["embedding IS NOT NULL"]
         params: list[Any] = [query_vector]
         if record_types:
             where.append("record_type = ANY(%s)")
@@ -256,6 +300,43 @@ class PostgresProvider(DocumentRepository):
             )
         return results
 
+    def _lexical_rows(
+        self,
+        tsquery_sql: str,
+        path_tsquery_sql: str,
+        query: str,
+        top_k: int,
+        record_types: list[str] | None,
+        folder_prefix: str | None,
+    ) -> list[dict[str, Any]]:
+        where = [
+            f"(content_tsv @@ {tsquery_sql} OR path_tsv @@ {path_tsquery_sql})"
+        ]
+        params: dict[str, Any] = {"query": query, "limit": top_k}
+        if record_types:
+            where.append("record_type = ANY(%(record_types)s)")
+            params["record_types"] = record_types
+        if folder_prefix:
+            where.append("source_path LIKE %(folder)s")
+            params["folder"] = f"{_like_escape(folder_prefix)}%"
+
+        sql = f"""
+            SELECT *,
+                ts_rank_cd(content_tsv, {tsquery_sql})
+                + 0.5 * ts_rank_cd(path_tsv, {path_tsquery_sql}) AS lex_score
+            FROM {self.table}
+            WHERE {' AND '.join(where)}
+            ORDER BY lex_score DESC
+            LIMIT %(limit)s;
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
     def search_lexical(
         self,
         query: str,
@@ -263,30 +344,43 @@ class PostgresProvider(DocumentRepository):
         record_types: list[str] | None = None,
         folder_prefix: str | None = None,
     ) -> list[SearchResult]:
-        where = ["content_tsv @@ plainto_tsquery('english', %s)"]
-        params: list[Any] = [query, query]
-        if record_types:
-            where.append("record_type = ANY(%s)")
-            params.append(record_types)
-        if folder_prefix:
-            where.append("source_path LIKE %s")
-            params.append(f"{_like_escape(folder_prefix)}%")
-        params.append(top_k)
-
-        sql = f"""
-            SELECT *, ts_rank_cd(content_tsv, plainto_tsquery('english', %s)) AS lex_score
-            FROM {self.table}
-            WHERE {' AND '.join(where)}
-            ORDER BY lex_score DESC
-            LIMIT %s;
-        """
-        conn = self._connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                rows = cur.fetchall()
-        finally:
-            conn.close()
+        path_query = (
+            "websearch_to_tsquery('simple', "
+            "regexp_replace(%(query)s, '[^[:alnum:]]+', ' ', 'g'))"
+        )
+        rows_by_id: dict[str, dict[str, Any]] = {}
+        for variant in numeric_query_variants(query):
+            variant_rows = self._lexical_rows(
+                "websearch_to_tsquery('english', %(query)s)",
+                path_query,
+                variant,
+                top_k,
+                record_types,
+                folder_prefix,
+            )
+            # websearch_to_tsquery joins plain terms with AND, whereas LanceDB's
+            # BM25 path matches any term. Retry plain multi-word queries with OR
+            # so switching engines does not turn useful keyword hits into zero.
+            if not variant_rows and _plain_keyword_query(variant):
+                variant_rows = self._lexical_rows(
+                    "replace(websearch_to_tsquery('english', %(query)s)::text, '&', '|')::tsquery",
+                    f"replace({path_query}::text, '&', '|')::tsquery",
+                    variant,
+                    top_k,
+                    record_types,
+                    folder_prefix,
+                )
+            for row in variant_rows:
+                row_id = str(row.get("id", ""))
+                score = float(row.get("lex_score") or 0.0)
+                existing = rows_by_id.get(row_id)
+                if existing is None or score > float(existing.get("lex_score") or 0.0):
+                    rows_by_id[row_id] = row
+        rows = sorted(
+            rows_by_id.values(),
+            key=lambda row: float(row.get("lex_score") or 0.0),
+            reverse=True,
+        )[:top_k]
 
         raw = [float(row["lex_score"] or 0.0) for row in rows]
         max_score = max(raw) if raw else 1.0
@@ -371,9 +465,18 @@ class PostgresProvider(DocumentRepository):
                     f"SELECT COUNT(DISTINCT source_path) AS n FROM {self.table};"
                 )
                 files = int(cur.fetchone()["n"])
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM {self.table} "
+                    "WHERE embedding IS NULL;"
+                )
+                missing = int(cur.fetchone()["n"])
         finally:
             conn.close()
-        return {"total_records": total, "total_files": files}
+        return {
+            "total_records": total,
+            "total_files": files,
+            "missing_vectors": missing,
+        }
 
     def indexed_file_hashes(self) -> set[str]:
         conn = self._connect()
